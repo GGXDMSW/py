@@ -25,7 +25,7 @@ from core.state_manager import StateManager
 import config.config_manager
 from pipelines.scheduler import SchedulerDaemon
 from services.clash_client import ClashClient
-from services.subscription_service import get_node_endpoint, choose_canonical_node_name
+from services.subscription_service import SubscriptionService
 from services.colo_service import is_asian_node, analyze_colo_stats
 from services.filter_service import compute_delay_stats
 from services.pool_service import get_pool_endpoint_sets

@@ -4,6 +4,6 @@ Traceback (most recent call last):
     from gui_fluent.main_window import MainWindow
   File "C:\Users\leime\Desktop\py\gui_fluent\main_window.py", line 33, in <module>
     from gui_fluent.app_controller import AppController
-  File "C:\Users\leime\Desktop\py\gui_fluent\app_controller.py", line 28, in <module>
-    from services.subscription_service import get_node_endpoint, choose_canonical_node_name
-ImportError: cannot import name 'get_node_endpoint' from 'services.subscription_service' (C:\Users\leime\Desktop\py\services\subscription_service.py)
+  File "C:\Users\leime\Desktop\py\gui_fluent\app_controller.py", line 31, in <module>
+    from services.pool_service import get_pool_endpoint_sets
+ImportError: cannot import name 'get_pool_endpoint_sets' from 'services.pool_service' (C:\Users\leime\Desktop\py\services\pool_service.py)
