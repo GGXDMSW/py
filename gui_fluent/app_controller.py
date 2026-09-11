@@ -22,7 +22,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from core.state_manager import StateManager
-from config.config_manager import atomic_save_config, safe_load_config, prune_expired_history
+import config.config_manager
 from pipelines.scheduler import SchedulerDaemon
 from services.clash_client import ClashClient, ClashModeGuard
 from services.subscription_service import get_node_endpoint, choose_canonical_node_name
