@@ -10,7 +10,10 @@ Traceback (most recent call last):
   File "C:\Users\leime\Desktop\py\gui_fluent\app_controller.py", line 73, in __init__
     self._load_persisted_into_state()
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
-  File "C:\Users\leime\Desktop\py\gui_fluent\app_controller.py", line 125, in _load_persisted_into_state
-    with self.state.lock:
-         ^^^^^^^^^^^^^^^
-AttributeError: 'StateManager' object has no attribute 'lock'
+  File "C:\Users\leime\Desktop\py\gui_fluent\app_controller.py", line 142, in _load_persisted_into_state
+    self.clean_favorites_ghost_tokens()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\leime\Desktop\py\gui_fluent\app_controller.py", line 183, in clean_favorites_ghost_tokens
+    for item in list(self.state.all_nodes) + [s.get("matched_name", "") for s in self.state.stars_nodes]:
+                     ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'StateManager' object has no attribute 'all_nodes'

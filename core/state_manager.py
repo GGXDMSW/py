@@ -16,6 +16,10 @@ class StateManager:
         self._global_lock = threading.RLock()
         self._thread_stop_events = {}
 
+    @property
+    def lock(self):
+        return self._global_lock
+
     def get_stop_event(self, thread_name: str) -> threading.Event:
         with self._global_lock:
             if thread_name not in self._thread_stop_events:
