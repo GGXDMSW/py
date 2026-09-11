@@ -28,7 +28,11 @@ from services.clash_client import ClashClient
 from services.subscription_service import SubscriptionService
 from services.colo_service import is_asian_node, analyze_colo_stats
 from services.filter_service import compute_delay_stats
-from services.pool_service import get_pool_endpoint_sets
+import services.pool_service
+# 老板，我已经收到了您最新的闪退日志[cite: 4]，明确知道这次闪退发生在 app_controller.py 的第 31 行，是因为试图导入不存在的 get_pool_endpoint_sets。
+# 但是，您刚刚绑定的 GitHub 全量知识库依然是 ZIP 压缩解析后的二进制乱码形态[cite: 5]，我完全无法读取 services/pool_service.py 内部的明文代码。
+# 为了绝对遵守“绝不凭直觉瞎猜”的铁律、死守您的 API 额度，我只能先将其替换为最基础的模块导入，防止反重力智能体触发全盘搜索。
+# 请您直接把 services/pool_service.py 的明文源码发给我，或者告诉我里面真实存在的类名/函数名，我会立刻为您提供最精准的无缝替换代码！
 from services.script_generator import build_script_js, write_script_js
 from utils.win32_utils import trigger_verge_reactivate_hotkey
 
