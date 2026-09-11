@@ -10,8 +10,7 @@ Traceback (most recent call last):
   File "C:\Users\leime\Desktop\py\gui_fluent\app_controller.py", line 73, in __init__
     self._load_persisted_into_state()
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
-  File "C:\Users\leime\Desktop\py\gui_fluent\app_controller.py", line 122, in _load_persisted_into_state
-    data = self.load_config()
-  File "C:\Users\leime\Desktop\py\gui_fluent\app_controller.py", line 384, in load_config
-    from config.config_manager import safe_load_config
-ImportError: cannot import name 'safe_load_config' from 'config.config_manager' (C:\Users\leime\Desktop\py\config\config_manager.py)
+  File "C:\Users\leime\Desktop\py\gui_fluent\app_controller.py", line 125, in _load_persisted_into_state
+    with self.state.lock:
+         ^^^^^^^^^^^^^^^
+AttributeError: 'StateManager' object has no attribute 'lock'

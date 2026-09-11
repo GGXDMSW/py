@@ -1395,6 +1395,17 @@ class ConfigManager:
         with self.file_lock:
             self.config_data[key] = value
             self.save_config()
+
+def safe_load_config(path):
+    """安全加载 JSON 配置文件，异常时返回空字典兜底"""
+    import os, json
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
 ```
 
 ## File: `config/settings.py`
