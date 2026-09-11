@@ -1,10 +1,19 @@
+import sys
+import traceback
+
+def global_exception_handler(exc_type, exc_value, exc_traceback):
+    with open("crash_log.txt", "w", encoding="utf-8") as f:
+        f.write("=== 软件闪退错误日志 ===\n")
+        traceback.print_exception(exc_type, exc_value, exc_traceback, file=f)
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+sys.excepthook = global_exception_handler
+
 """
 Clash Verge 节点管理助手 (Fluent 版)
 规范化主启动入口
 """
 import os
-import sys
-import traceback
 
 # 优先导入 qfluentwidgets 以确定加载的 Qt 运行时绑定 (PyQt5 或 PyQt6)
 import qfluentwidgets

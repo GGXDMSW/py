@@ -1,0 +1,9 @@
+=== 软件闪退错误日志 ===
+Traceback (most recent call last):
+  File "C:\Users\leime\Desktop\py\main_fluent.py", line 28, in <module>
+    from gui_fluent.main_window import MainWindow
+  File "C:\Users\leime\Desktop\py\gui_fluent\main_window.py", line 33, in <module>
+    from gui_fluent.app_controller import AppController
+  File "C:\Users\leime\Desktop\py\gui_fluent\app_controller.py", line 27, in <module>
+    from services.clash_client import ClashClient, ClashModeGuard
+ImportError: cannot import name 'ClashModeGuard' from 'services.clash_client' (C:\Users\leime\Desktop\py\services\clash_client.py)
