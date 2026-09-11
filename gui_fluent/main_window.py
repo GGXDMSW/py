@@ -27,6 +27,7 @@ from qfluentwidgets import (
     MessageBox,
     setTheme,
     Theme,
+    PushButton,
 )
 
 from gui_fluent.app_controller import AppController
@@ -35,7 +36,6 @@ from gui_fluent.components.log_panel import LogPanel
 from gui_fluent.components.bottom_action_bar import BottomActionBar
 from gui_fluent.components.pipeline_card import PipelineCard
 
-
 from gui_fluent.pages.page_active import PageActive
 from gui_fluent.pages.page_favorites import PageFavorites
 from gui_fluent.pages.page_verified import PageVerified
@@ -43,6 +43,8 @@ from gui_fluent.pages.page_stars import PageStars
 from gui_fluent.pages.page_delay_black import PageDelayBlack
 from gui_fluent.pages.page_speed_black import PageSpeedBlack
 from gui_fluent.pages.page_cloud_text import PageCloudText
+
+from gui_fluent.widgets.c_miner_dialog import CSegmentMinerDialog
 
 
 class MainWindow(QWidget):
@@ -112,12 +114,17 @@ class MainWindow(QWidget):
         self.main_layout.setContentsMargins(16, 12, 16, 10)
         self.main_layout.setSpacing(8)
 
-        # 1. 顶部横向 SegmentedWidget
+        # 1. 顶部横向 SegmentedWidget 与 C段挖掘入口
         self.nav_layout = QHBoxLayout()
         self.nav_layout.setContentsMargins(0, 0, 0, 0)
         self.segment = SegmentedWidget(self)
         self.nav_layout.addWidget(self.segment)
         self.nav_layout.addStretch(1)
+        
+        self.btn_c_miner = PushButton("🔍 C段深度挖掘", self)
+        self.btn_c_miner.clicked.connect(self._on_c_miner_clicked)
+        self.nav_layout.addWidget(self.btn_c_miner)
+
         self.main_layout.addLayout(self.nav_layout)
 
         # 2. 上：TopBar (~68px)
@@ -503,6 +510,21 @@ class MainWindow(QWidget):
                 return eps
         return []
 
+    def _on_c_miner_clicked(self):
+        """
+        呼出 C 段全量极速深度挖掘对话框
+        """
+        seed_ip = "172.64.229.1"
+        nodes = self._get_current_selected_nodes()
+        if nodes:
+            ep = nodes[0]
+            if ":" in ep:
+                seed_ip = ep.split(":")[0]
+            else:
+                seed_ip = ep
+        dialog = CSegmentMinerDialog(seed_ip=seed_ip, seed_port=443, controller=self.controller, parent=self)
+        dialog.exec()
+
     def _on_btn_fav_clicked(self):
         nodes = self._get_current_selected_nodes()
         if not nodes:
@@ -757,6 +779,3 @@ class MainWindow(QWidget):
             self.controller.save_config(self.controller.state.get_snapshot())
             self.controller.log("💾 退出前已自动保存所有数据至 config...")
         super().closeEvent(event)
-
-
-
