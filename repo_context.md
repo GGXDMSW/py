@@ -5816,10 +5816,20 @@ class AutoPipelineWorker(QThread):
         super().__init__(parent)
         self.controller = controller
         self.config = dict(config)
+        self.thread = self
 
     def log(self, msg: str):
         """发射日志信号的统一快捷方法"""
         self.log_signal.emit(msg)
+
+    def stop(self):
+        # 将原有的 self.thread.terminate() 精准替换为以下平滑退出机制：
+        if self.thread and self.thread.isRunning():
+            self.thread.requestInterruption()
+            self.thread.quit()
+            if not self.thread.wait(2000):
+                self.thread.terminate()
+                self.thread.wait()
 
     def run(self):
         self.log_signal.emit("🚀 启动一整套全自动大优选流程 (Fluent 后台线程)...")
@@ -6378,6 +6388,8 @@ class AutoPipelineWorker(QThread):
             drift_passed_candidates = []
             now_pipe_t = time.time()
             for n in candidates:
+                if self.isInterruptionRequested():
+                    break
                 ep = _get_ep(n)
                 colo_hist = self.controller.state.node_colo_history.get(n, self.controller.state.node_colo_history.get(ep, []))
                 _, _, has_drift, drift_disp = analyze_colo_stats(colo_hist, now_pipe_t, node_name=n)
@@ -6481,9 +6493,7 @@ class AutoPipelineWorker(QThread):
                 with ClashModeGuard(self.controller.clash_client, temporary_mode="global"):
                     for idx, node_name in enumerate(candidates, 1):
                         if self.isInterruptionRequested():
-                            self.log_signal.emit("⏹ 用户已终止流水线任务")
-                            self.finished_signal.emit(False, "任务已被用户手动终止")
-                            return
+                            break
 
                         ep = _get_ep(node_name)
                         clash_node_name = graft_map.get(ep, node_name)
