@@ -66,7 +66,7 @@ class AppController(QObject):
         self.state = StateManager()
         self.state.blacklist_timestamps = {}
         self.state.cloud_endpoints = {}
-        self.clash_client = ClashClient(host="127.0.0.1", port=9097, secret="")
+        self.clash_client = ClashClient(base_url="http://127.0.0.1:9097")
         self._pipeline_worker = None
         self._fav_pipeline_worker = None
         self._scheduler_config_provider = None
