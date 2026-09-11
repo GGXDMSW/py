@@ -1,78 +1,64 @@
 import os
 
-# 核心目录白名单 (已核实并扩充当前仓库所有最新核心子模块)
-core_dirs = [
-    'config',
-    'core',
-    'gui',
-    'gui_fluent',
-    'pipelines',
-    'services',
-    'utils'
-]
+def is_ignored(path):
+    ignored_dirs = {'.git', '__pycache__', '.idea', '.vscode', 'venv', 'env', 'node_modules', 'dist', 'build'}
+    ignored_exts = {'.pyc', '.pyd', '.exe', '.dll', '.so', '.dylib', '.png', '.jpg', '.jpeg', '.gif', '.zip', '.tar', '.gz', '.ico', '.pdf', '.bak'}
+    
+    parts = path.split(os.sep)
+    if any(part in ignored_dirs for part in parts):
+        return True
+        
+    ext = os.path.splitext(path)[1].lower()
+    if ext in ignored_exts:
+        return True
+        
+    if os.path.basename(path) == 'repo_context.md':
+        return True
+        
+    return False
 
-# 核心文件白名单
-core_files = [
-    'main.py',
-    'main_fluent.py',
-    'AGENTS.md'
-]
-
-# 忽略的目录和文件特征
-ignore_dirs = ['__pycache__', '.git', '.idea', '.vscode']
-ignore_exts = ['.pyc', '.bak', '.zip', '.json', '.txt', '.js']
-
-def generate_tree(startpath):
-    tree_str = ""
-    for root, dirs, files in os.walk(startpath):
-        dirs[:] = [d for d in dirs if d not in ignore_dirs]
-        level = root.replace(startpath, '').count(os.sep)
-        indent = ' ' * 4 * level
-        tree_str += f"{indent}{os.path.basename(root)}/\n"
-        subindent = ' ' * 4 * (level + 1)
-        for f in files:
-            if not any(f.endswith(ext) for ext in ignore_exts):
-                tree_str += f"{subindent}{f}\n"
-    return tree_str
-
-def pack_code():
+def pack_repo():
     output_file = 'repo_context.md'
     
-    with open(output_file, 'w', encoding='utf-8') as out:
-        out.write("# Repository Global Context\n\n")
+    with open(output_file, 'w', encoding='utf-8') as out_f:
+        out_f.write("# Repository Context\n\n")
+        out_f.write("This file contains the complete, un-truncated source code of the repository to provide a full context.\n\n")
         
-        out.write("## Directory Tree\n```text\n")
-        out.write(generate_tree('.'))
-        out.write("```\n\n")
-        
-        out.write("## Core Files\n\n")
-        for file in core_files:
-            if os.path.exists(file):
-                out.write(f"### File: {file}\n```python\n")
+        for root, dirs, files in os.walk('.'):
+            dirs[:] = [d for d in dirs if not is_ignored(os.path.join(root, d))]
+            
+            for file in files:
+                file_path = os.path.join(root, file)
+                if is_ignored(file_path):
+                    continue
+                    
+                display_path = os.path.normpath(file_path).replace('\\', '/')
+                if display_path.startswith('./'):
+                    display_path = display_path[2:]
+                    
                 try:
-                    with open(file, 'r', encoding='utf-8') as f:
-                        out.write(f.read())
+                    with open(file_path, 'r', encoding='utf-8') as in_f:
+                        content = in_f.read()
+                        
+                    out_f.write(f"## File: `{display_path}`\n\n")
+                    
+                    ext = os.path.splitext(file)[1].lower()
+                    lang = ext[1:] if ext else 'text'
+                    if lang == 'py': 
+                        lang = 'python'
+                    elif lang == 'md':
+                        lang = 'markdown'
+                    
+                    out_f.write(f"```{lang}\n")
+                    out_f.write(content)
+                    if content and not content.endswith('\n'):
+                        out_f.write('\n')
+                    out_f.write("```\n\n")
                 except Exception as e:
-                    out.write(f"# Error reading file: {e}")
-                out.write("\n```\n\n")
-                
-        out.write("## Core Modules\n\n")
-        for d in core_dirs:
-            if os.path.exists(d):
-                for root, dirs, files in os.walk(d):
-                    dirs[:] = [dir_name for dir_name in dirs if dir_name not in ignore_dirs]
-                    for file in files:
-                        if file.endswith('.py') or file.endswith('.md'):
-                            filepath = os.path.join(root, file)
-                            filepath_posix = filepath.replace('\\', '/')
-                            out.write(f"### File: {filepath_posix}\n```python\n")
-                            try:
-                                with open(filepath, 'r', encoding='utf-8') as f:
-                                    out.write(f.read())
-                            except Exception as e:
-                                out.write(f"# Error reading file: {e}")
-                            out.write("\n```\n\n")
+                    out_f.write(f"## File: `{display_path}`\n\n")
+                    out_f.write(f"> Error reading file: {str(e)}\n\n")
 
 if __name__ == '__main__':
-    pack_code()
-    print("Successfully generated repo_context.md with complete core modules.")
+    print("Packing repository into repo_context.md without truncation...")
+    pack_repo()
+    print("Done! repo_context.md is now fully updated.")
