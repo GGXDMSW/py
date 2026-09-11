@@ -4,6 +4,6 @@ Traceback (most recent call last):
     from gui_fluent.main_window import MainWindow
   File "C:\Users\leime\Desktop\py\gui_fluent\main_window.py", line 33, in <module>
     from gui_fluent.app_controller import AppController
-  File "C:\Users\leime\Desktop\py\gui_fluent\app_controller.py", line 27, in <module>
-    from services.clash_client import ClashClient, ClashModeGuard
-ImportError: cannot import name 'ClashModeGuard' from 'services.clash_client' (C:\Users\leime\Desktop\py\services\clash_client.py)
+  File "C:\Users\leime\Desktop\py\gui_fluent\app_controller.py", line 28, in <module>
+    from services.subscription_service import get_node_endpoint, choose_canonical_node_name
+ImportError: cannot import name 'get_node_endpoint' from 'services.subscription_service' (C:\Users\leime\Desktop\py\services\subscription_service.py)
