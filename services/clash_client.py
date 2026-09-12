@@ -121,6 +121,11 @@ class ClashClient:
         data = self.call_api("/proxies", timeout=3.0)
         return data.get("proxies", {}) if (data and isinstance(data, dict)) else {}
 
+    def get_proxy(self, proxy_name: str, timeout: float = 1.5) -> dict:
+        enc_name = urllib.parse.quote(proxy_name, safe="")
+        data = self.call_api(f"/proxies/{enc_name}", timeout=timeout)
+        return data if (data and isinstance(data, dict)) else {}
+
     def query_proxy_delay(self, proxy_name, test_url, timeout_ms=1500):
         enc_name = urllib.parse.quote(proxy_name, safe="")
         enc_url = urllib.parse.quote(test_url, safe="")
