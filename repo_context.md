@@ -1619,22 +1619,6 @@ console.log('Result auto no-hk group count:', out['proxy-groups'].find(g => g.na
 console.log('Sample no-hk proxies:', out['proxy-groups'].find(g => g.name === '⚡ 自动选择 (非香港)').proxies.slice(0, 5));
 ```
 
-## File: `temp_test.js`
-
-```javascript
-
-const fs = require('fs');
-const scriptContent = fs.readFileSync('C:/Users/leime/AppData/Roaming/io.github.clash-verge-rev.clash-verge-rev/profiles/Script.js', 'utf8');
-eval(scriptContent);
-
-const p1 = { name: '辣子鸡优选 | 中国香港 HK | 43.175.131.30:443', server: '43.175.131.30', port: 443 };
-const p2 = { name: '香港 HKG 24.62 MB/s', server: '43.175.131.30', port: 443 };
-const cfg = { proxies: [p1, p2], 'proxy-groups': [], rules: [] };
-const res = main(cfg);
-const g = res['proxy-groups'].find(x => x.name === '⚡ 自动选择');
-console.log(JSON.stringify(g.proxies));
-```
-
 ## File: `代码审查报告.md`
 
 ```markdown
@@ -11862,6 +11846,7 @@ import re
 import threading
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from config.settings import EXCLUDE_HK_REGEX
@@ -11903,7 +11888,17 @@ class AutoHealWatcher:
         self.probe_timeout_ms: int = 1200          # 哨兵微探针超时对齐客户端 (1200ms 容纳 VLESS TLS 冷启动与首包重传，彻底消除假超时)
         self.cooldown_duration: float = 900.0      # 坏死节点临时熔断冷冻时长 (秒, 默认15分钟)
         self.min_switch_interval: float = 8.0      # 连续自愈最小时间间隔 (防雪崩/防抖动)
-        self.probe_url: str = "http://www.gstatic.com/generate_204"  # 对齐客户端明文探测 URL，无多余 TLS 开销
+        self.conn_snapshots: Dict[str, dict] = {}  # {conn_id: {"up": int, "down": int, "ts": float, "stall_since": float}}
+        self.probe_urls: List[str] = [
+            "https://www.google.com/generate_204",
+            "https://cp.cloudflare.com/generate_204",
+        ]
+        self.probe_url: str = self.probe_urls[0]
+
+        # 【主循环彻底解耦与防抖核心】
+        self._heal_lock = threading.Lock()
+        self._healing_groups: Set[str] = set()     # 正在执行异步自愈流水线的策略组集合
+        self._heal_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="AutoHealWorker")
         
         # Cloudflare 专属平滑自愈与防抽风参数
         self.degrade_rtt_ms: int = 280            # 哨兵探针严重劣化判定门禁 (毫秒)
@@ -11958,6 +11953,10 @@ class AutoHealWatcher:
     def stop(self):
         with self._lock:
             self._running = False
+        try:
+            self._heal_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
 
     def is_running(self) -> bool:
         return self._running and self._thread is not None and self._thread.is_alive()
@@ -12131,14 +12130,11 @@ class AutoHealWatcher:
 
     def _check_and_heal(self):
         now = time.time()
-        proxies_map = self.client.get_proxies()
-        if not proxies_map:
-            return
 
-        # 1. 抓取被监控策略组当前正在使用的物理节点
+        # 1. 轻量拉取各组当前在用节点（调用 self.client.get_proxy(grp)）
         group_current_nodes: Dict[str, str] = {}
         for grp in self.monitored_groups:
-            g_data = proxies_map.get(grp, {})
+            g_data = self.client.get_proxy(grp, timeout=0.8)
             c_node = g_data.get("now", "")
             if c_node:
                 group_current_nodes[grp] = c_node
@@ -12147,31 +12143,42 @@ class AutoHealWatcher:
         self.current_active_nohk_node = group_current_nodes.get("⚡ 自动选择 (非香港)", "未知非港出口")
 
         # 2. 读取当前活跃连接快照
-        conns_data = self.client.get_connections(timeout=1.8)
+        conns_data = self.client.get_connections(timeout=0.8)
         if not conns_data or not isinstance(conns_data, dict):
             return
 
         connections = conns_data.get("connections", [])
         if not connections:
+            self.conn_snapshots.clear()
             self.current_status_summary = f"空闲就绪 (全量: {self.current_active_node} | 非港: {self.current_active_nohk_node})"
             self._notify_status()
             return
 
-        # 3. 分析单向发包黑洞与软失速假死，按 (所属策略组, 物理节点) 聚类统计
-        # blackhole_hosts: {(group_name, node_name): set(host1, host2, ...)}
+        # 3. 严格协议过滤与 Delta Rate 增量计算
         blackhole_hosts: Dict[Tuple[str, str], Set[str]] = {}
         blackhole_conn_ids: Dict[Tuple[str, str], List[str]] = {}
         blackhole_stall_types: Dict[Tuple[str, str], Set[str]] = {}
+        active_cids: Set[str] = set()
 
         for conn in connections:
-            chains = conn.get("chains", [])
-            if not chains:
+            cid = conn.get("id")
+            if not cid:
+                continue
+            active_cids.add(cid)
+
+            # 严格协议过滤：仅分析 net_type == "tcp" 的外部连接，非 TCP 协议（UDP/ICMP）直接 continue 跳过
+            metadata = conn.get("metadata", {})
+            net_type = str(metadata.get("network", "") or conn.get("network", "")).lower()
+            if net_type != "tcp":
                 continue
 
-            node_name = chains[0]
-            metadata = conn.get("metadata", {})
             host = metadata.get("host") or metadata.get("destinationIP") or ""
             if not self._is_external_host(host):
+                continue
+
+            chains = conn.get("chains", [])
+            node_name = chains[0] if chains else ""
+            if not node_name:
                 continue
 
             upload = conn.get("upload", 0)
@@ -12179,20 +12186,45 @@ class AutoHealWatcher:
             start_ts = self._parse_start_time(conn.get("start", ""))
             duration = now - start_ts
 
-            # 物理硬断流检测 (单向发包黑洞)：持续多秒有上传无下载 (upload > 0, download == 0)
-            # 只有当且仅当向外发出了请求 (如 TCP SYN / HTTP Request)，但在超时窗口内没有任何数据返回，才是真实物理断流
-            # 凡是 download > 0 的连接，说明握手和下行响应均已成功，绝大部分为空闲长连接 (Keep-Alive)，严禁误判为断流！
-            is_hard_stall = (duration >= self.blackhole_timeout and upload > 0 and download == 0)
+            is_stalled = False
+            stall_type = ""
 
-            if is_hard_stall:
-                # 定位该连接属于哪个受监控的策略组 (血统溯源)
+            # 4. Delta Rate 增量计算
+            if cid not in self.conn_snapshots:
+                # 若 conn_id 首次出现：初始化 snapshot
+                if duration >= self.blackhole_timeout and upload > 0 and download == 0:
+                    is_stalled = True
+                    stall_type = "硬断流"
+                    stall_since = now
+                else:
+                    stall_since = 0.0
+                self.conn_snapshots[cid] = {
+                    "up": upload,
+                    "down": download,
+                    "ts": now,
+                    "stall_since": stall_since,
+                }
+            else:
+                prev = self.conn_snapshots[cid]
+                delta_up = upload - prev["up"]
+                delta_down = download - prev["down"]
+                prev["up"], prev["down"], prev["ts"] = upload, download, now
+                if (delta_up > 0 and delta_down == 0) or (upload > 0 and download == 0):
+                    if prev["stall_since"] == 0.0:
+                        prev["stall_since"] = now
+                    if (now - prev["stall_since"]) >= self.blackhole_timeout:
+                        is_stalled = True
+                        stall_type = "在途软失速" if download > 0 else "硬断流"
+                else:
+                    prev["stall_since"] = 0.0
+
+            if is_stalled:
                 matched_grp = None
                 for grp in self.monitored_groups:
                     if grp in chains:
                         matched_grp = grp
                         break
 
-                # 若链条中无直接显式名称，则根据该节点当前被哪个组选用推断
                 if not matched_grp:
                     for grp, curr_n in group_current_nodes.items():
                         if curr_n == node_name:
@@ -12207,87 +12239,60 @@ class AutoHealWatcher:
                     blackhole_hosts[pair_key] = set()
                     blackhole_conn_ids[pair_key] = []
                     blackhole_stall_types[pair_key] = set()
+
                 root_domain = self._get_root_domain(host)
                 blackhole_hosts[pair_key].add(root_domain or host)
-                blackhole_conn_ids[pair_key].append(conn.get("id"))
-                blackhole_stall_types[pair_key].add("硬断流")
+                blackhole_conn_ids[pair_key].append(cid)
+                blackhole_stall_types[pair_key].add(stall_type)
 
-        # 4. 逐一巡检受监控策略组中的在用节点是否集体暴毙或严重抽风 (同时预先刷新内存热备就绪池)
-        self._refresh_standby_cache(proxies_map)
-        healed_any = False
+        # 5. 清理已断开连接的 snapshot 字典，防止内存泄漏
+        dead_keys = [k for k in self.conn_snapshots if k not in active_cids]
+        for k in dead_keys:
+            self.conn_snapshots.pop(k, None)
+
+        # 6. 复合触发判定与异步分发（0ms 阻塞）
+        self._refresh_standby_cache()
+
         for grp, curr_n in group_current_nodes.items():
             pair_key = (grp, curr_n)
-            if pair_key in blackhole_hosts:
-                distinct_hosts = blackhole_hosts[pair_key]
-                if len(distinct_hosts) >= self.min_blackhole_hosts:
-                    stall_types = blackhole_stall_types.get(pair_key, set())
-                    stall_desc = "/".join(sorted(list(stall_types))) if stall_types else "断流"
-                    hosts_preview = ", ".join(sorted(list(distinct_hosts))[:3])
-                    is_non_hk = ("非香港" in grp)
+            distinct_hosts = blackhole_hosts.get(pair_key, set())
+            stalled_conns = blackhole_conn_ids.get(pair_key, [])
+            is_suspicious = (len(distinct_hosts) >= self.min_blackhole_hosts) or (
+                len(distinct_hosts) >= 1 and len(stalled_conns) >= 3
+            )
 
-                    # 触发嫌疑，发射质量哨兵微探针 (对齐客户端 1200ms HTTP 探针)
-                    probe_delay = self.client.query_proxy_delay(curr_n, self.probe_url, timeout_ms=self.probe_timeout_ms)
+            if is_suspicious:
+                # 【防抖防重入门禁检查】
+                with self._heal_lock:
+                    if grp in self._healing_groups:
+                        continue  # 该策略组已有后台自愈任务在执行，跳过，绝不重复触发！
+                    if (now - self.last_heal_timestamp) < self.min_switch_interval:
+                        continue  # 处于避震窗口内，跳过
+                    # 成功获取自愈任务令牌
+                    self._healing_groups.add(grp)
 
-                    # 分支 A：探针初次超时 (>= 99999ms) —— 启动防抖复测，避免因瞬时并发高吞吐丢包导致误杀！
-                    if probe_delay >= 99999:
-                        time.sleep(0.4)
-                        retry_delay = self.client.query_proxy_delay(curr_n, self.probe_url, timeout_ms=self.probe_timeout_ms)
-                        if retry_delay >= 99999:
-                            dead_reason = (
-                                f"【{grp}】并发 {len(distinct_hosts)} 个独立主域名{stall_desc}且复测探针连续超时暴毙 "
-                                f"(目标: {hosts_preview})"
-                            )
-                            self.yellow_cards.pop(curr_n, None)
-                            self._execute_auto_heal(
-                                target_group=grp,
-                                dead_node=curr_n,
-                                reason=dead_reason,
-                                dead_conn_ids=blackhole_conn_ids.get(pair_key, []),
-                                is_non_hk=is_non_hk,
-                            )
-                            healed_any = True
-                        else:
-                            self.log(f"⚠️ [探针防抖生效] 节点 【{curr_n}】 初次探测超时，但复测成功 ({retry_delay}ms)，避免误杀")
-                            probe_delay = retry_delay
+                # 【Fire-and-Forget 瞬间分发到独立线程池，主循环 0 毫秒放行，绝不等待任何结果】
+                stall_desc = "/".join(sorted(list(blackhole_stall_types.get(pair_key, set())))) or "断流"
+                is_non_hk = ("非香港" in grp)
+                self._heal_executor.submit(
+                    self._async_heal_worker,
+                    grp,
+                    curr_n,
+                    list(distinct_hosts),
+                    list(stalled_conns),
+                    is_non_hk,
+                    stall_desc,
+                )
 
-                    # 分支 B：探针自身也严重劣化 (>= degrade_rtt_ms 且 < 99999) —— 启动观察缓冲与双黄牌机制
-                    # 【核心法则】：若探针极速通畅 (< 280ms，如 37ms)，拥有一票否决权，绝对判定为物理健康，绝不发牌误杀！
-                    elif probe_delay >= self.degrade_rtt_ms:
-                        last_card_ts = self.yellow_cards.get(curr_n, 0.0)
-                        time_since_last_card = now - last_card_ts
+        with self._heal_lock:
+            currently_healing = list(self._healing_groups)
 
-                        if self.strike_min_interval <= time_since_last_card <= self.strike_window:
-                            # 满足在 [10s, 60s] 观察缓冲期后二次抽风，两黄变一红！强制退位顺移
-                            dead_reason = (
-                                f"【{grp}】经观察缓冲期后二次抽风/延迟严重劣化 ({probe_delay}ms >= {self.degrade_rtt_ms}ms, {stall_desc}) "
-                                f"(目标: {hosts_preview})"
-                            )
-                            self.yellow_cards.pop(curr_n, None)
-                            self.log(f"🚨 [两黄变一红] 节点 【{curr_n}】 经 {int(time_since_last_card)}s 观察期后持续抽风劣化 ({probe_delay}ms)，出示红牌强制退位顺移！")
-                            self._execute_auto_heal(
-                                target_group=grp,
-                                dead_node=curr_n,
-                                reason=dead_reason,
-                                dead_conn_ids=blackhole_conn_ids.get(pair_key, []),
-                                is_non_hk=is_non_hk,
-                            )
-                            healed_any = True
-                        elif time_since_last_card < self.strike_min_interval:
-                            # 还在 10 秒观察缓冲期内，保持观察，绝不连出两牌
-                            self.current_status_summary = f"🟨 黄牌观察中 ({curr_n} 延迟 {probe_delay}ms)"
-                            self._notify_status()
-                        else:
-                            # 首次抽风 (或距离上次已超过 60s 重置)，出示新黄牌并开始观察期
-                            self.yellow_cards[curr_n] = now
-                            self.log(f"🟨 [自愈黄牌] 节点 【{curr_n}】 延迟飙升劣化 ({probe_delay}ms >= {self.degrade_rtt_ms}ms, {stall_desc})，出示黄牌进入观察期...")
-                            self.current_status_summary = f"🟨 黄牌警告 ({curr_n} 延迟 {probe_delay}ms) | 观察中"
-                            self._notify_status()
-                    else:
-                        # 探针通畅 (< degrade_rtt_ms，如 37ms)，一票否决证明当前节点健康！
-                        if curr_n in self.yellow_cards and (now - self.yellow_cards[curr_n]) > self.strike_window:
-                            self.yellow_cards.pop(curr_n, None)
-
-        if not healed_any:
+        if currently_healing:
+            self.current_status_summary = (
+                f"🔄 深度自愈探查中 (目标组: {', '.join(currently_healing)})"
+            )
+            self._notify_status()
+        else:
             active_count = len(connections)
             yc_count = len([k for k, v in self.yellow_cards.items() if (now - v) <= self.strike_window])
             yc_str = f" | 🟨黄牌节点: {yc_count}" if yc_count > 0 else ""
@@ -12295,6 +12300,78 @@ class AutoHealWatcher:
                 f"🟢 双通道畅通 (全量: {self.current_active_node} | 非港: {self.current_active_nohk_node} | 活跃: {active_count}{yc_str})"
             )
             self._notify_status()
+
+    def _async_heal_worker(
+        self,
+        grp: str,
+        curr_n: str,
+        distinct_hosts: list,
+        dead_conn_ids: list,
+        is_non_hk: bool,
+        stall_desc: str,
+    ):
+        """
+        独立线程池中执行的自愈工作流水线：
+        双通道 HTTPS 竞速探针 -> 裁决判定 -> 顺位切换 -> 并发清理僵尸连接
+        """
+        try:
+            # 1. 双通道 HTTPS 并发竞速探针（验证 443 端口与 TLS 握手）
+            probe_delay = 99999
+            for u in self.probe_urls:
+                d = self.client.query_proxy_delay(curr_n, u, timeout_ms=self.probe_timeout_ms)
+                if d < probe_delay:
+                    probe_delay = d
+                if probe_delay < self.degrade_rtt_ms:
+                    break  # 极速响应直接短路返回，无需重复探测
+
+            # 2. 探针裁决逻辑
+            now = time.time()
+            hosts_preview = ", ".join(sorted(distinct_hosts)[:3])
+            if probe_delay >= 99999:
+                # 确认物理暴毙，立即下发自愈顺移
+                dead_reason = (
+                    f"【{grp}】并发 {len(distinct_hosts)} 个主域名{stall_desc}且 HTTPS 探针超时暴毙 (目标: {hosts_preview})"
+                )
+                self.yellow_cards.pop(curr_n, None)
+                self._execute_auto_heal(
+                    target_group=grp,
+                    dead_node=curr_n,
+                    reason=dead_reason,
+                    dead_conn_ids=dead_conn_ids,
+                    is_non_hk=is_non_hk,
+                )
+            elif probe_delay >= self.degrade_rtt_ms:
+                # 黄牌观察与两黄变一红机制
+                last_card_ts = self.yellow_cards.get(curr_n, 0.0)
+                time_since_last_card = now - last_card_ts
+                if self.strike_min_interval <= time_since_last_card <= self.strike_window:
+                    dead_reason = (
+                        f"【{grp}】二次抽风/延迟严重劣化 ({probe_delay}ms >= {self.degrade_rtt_ms}ms, {stall_desc}) (目标: {hosts_preview})"
+                    )
+                    self.yellow_cards.pop(curr_n, None)
+                    self._execute_auto_heal(
+                        target_group=grp,
+                        dead_node=curr_n,
+                        reason=dead_reason,
+                        dead_conn_ids=dead_conn_ids,
+                        is_non_hk=is_non_hk,
+                    )
+                elif time_since_last_card > self.strike_window or last_card_ts == 0.0:
+                    self.yellow_cards[curr_n] = now
+                    self.log(f"🟨 [自愈黄牌] 节点 【{curr_n}】 延迟飙升 ({probe_delay}ms)，出示黄牌进入观察期...")
+                    self.current_status_summary = f"🟨 黄牌警告 ({curr_n} 延迟 {probe_delay}ms) | 观察中"
+                    self._notify_status()
+            else:
+                # 探针极速通畅，一票否决证明健康
+                if curr_n in self.yellow_cards and (now - self.yellow_cards[curr_n]) > self.strike_window:
+                    self.yellow_cards.pop(curr_n, None)
+        except Exception as e:
+            self.log(f"⚠️ [自愈流水线异常] {grp} 自愈处理过程发生异常: {e}")
+        finally:
+            # 【防抖锁释放】：流水线结束（无论成功或异常），必须在锁内移出 grp
+            with self._heal_lock:
+                self._healing_groups.discard(grp)
+
 
     def _execute_auto_heal(
         self,
@@ -12353,15 +12430,20 @@ class AutoHealWatcher:
             log_msg = f"✨ [优雅引流完成] 策略组 【{target_group}】 耗时 {switch_cost_ms:.1f}ms 顺移至备选节点 【{backup_node}】！{non_hk_tip}"
             self.log(log_msg)
 
-            # 步骤 4：异步平滑清退 —— 仅定点清理真正坏死的僵尸连接，绝不滥杀活跃的正常数据流！
+            # 步骤 4：异步平滑并发清退 —— 使用 ThreadPoolExecutor 并发向内核提交 DELETE 请求
             def _delayed_drain():
-                time.sleep(0.5)
+                valid_cids = [cid for cid in dead_conn_ids if cid]
+                if not valid_cids:
+                    return
                 evicted_count = 0
-                for cid in dead_conn_ids:
-                    if cid and self.client.close_connection(cid, timeout=0.5):
-                        evicted_count += 1
+                try:
+                    with ThreadPoolExecutor(max_workers=8) as pool:
+                        results = list(pool.map(lambda cid: self.client.close_connection(cid, timeout=0.8), valid_cids))
+                        evicted_count = sum(1 for r in results if r)
+                except Exception:
+                    pass
                 if evicted_count > 0:
-                    self.log(f"🔪 [定点扫尾] 已精准清理旧节点 【{dead_node}】 遗留的 {evicted_count} 条死锁僵尸连接")
+                    self.log(f"🔪 [定点扫尾] 已并发精准清理旧节点 【{dead_node}】 遗留的 {evicted_count} 条死锁僵尸连接")
 
             threading.Thread(target=_delayed_drain, daemon=True, name="HealDrainThread").start()
 
@@ -12377,7 +12459,7 @@ class AutoHealWatcher:
 
         self._notify_status()
 
-    def _refresh_standby_cache(self, proxies_map: dict):
+    def _refresh_standby_cache(self, proxies_map: Optional[dict] = None):
         """
         在后台心跳中预先计算并缓存各策略组的顺位热备节点 (Pre-warmed Standby)，
         发生断流瞬间 0 延迟直接取用，无需临时排序与过滤。
@@ -12392,7 +12474,11 @@ class AutoHealWatcher:
                 except TypeError:
                     candidates = self.get_candidates_fn() or []
             if not candidates:
-                candidates = list(proxies_map.get(grp, {}).get("all", []))
+                if proxies_map and grp in proxies_map:
+                    candidates = list(proxies_map.get(grp, {}).get("all", []))
+                else:
+                    g_data = self.client.get_proxy(grp, timeout=0.8)
+                    candidates = list(g_data.get("all", []))
             if is_non_hk:
                 candidates = [c for c in candidates if c and not EXCLUDE_HK_REGEX.search(c)]
             # 过滤掉当前处于 15 分钟熔断期的节点
@@ -12420,8 +12506,8 @@ class AutoHealWatcher:
                 candidates = self.get_candidates_fn() or []
 
         if not candidates:
-            proxies_map = self.client.get_proxies()
-            candidates = list(proxies_map.get(target_group, {}).get("all", []))
+            g_data = self.client.get_proxy(target_group, timeout=1.0)
+            candidates = list(g_data.get("all", []))
 
         if is_non_hk:
             candidates = [c for c in candidates if c and not EXCLUDE_HK_REGEX.search(c)]
@@ -12451,9 +12537,10 @@ class AutoHealWatcher:
         """
         一键手动双通道链路深度诊断
         """
-        proxies_map = self.client.get_proxies()
-        auto_now = proxies_map.get("⚡ 自动选择", {}).get("now", "")
-        nohk_now = proxies_map.get("⚡ 自动选择 (非香港)", {}).get("now", "")
+        g_auto = self.client.get_proxy("⚡ 自动选择", timeout=1.2)
+        g_nohk = self.client.get_proxy("⚡ 自动选择 (非香港)", timeout=1.2)
+        auto_now = g_auto.get("now", "")
+        nohk_now = g_nohk.get("now", "")
 
         delay_auto = self.client.query_proxy_delay(auto_now, self.probe_url, timeout_ms=1500) if auto_now else 99999
         delay_nohk = self.client.query_proxy_delay(nohk_now, self.probe_url, timeout_ms=1500) if nohk_now else 99999
@@ -12659,6 +12746,11 @@ class ClashClient:
     def get_proxies(self):
         data = self.call_api("/proxies", timeout=3.0)
         return data.get("proxies", {}) if (data and isinstance(data, dict)) else {}
+
+    def get_proxy(self, proxy_name: str, timeout: float = 1.5) -> dict:
+        enc_name = urllib.parse.quote(proxy_name, safe="")
+        data = self.call_api(f"/proxies/{enc_name}", timeout=timeout)
+        return data if (data and isinstance(data, dict)) else {}
 
     def query_proxy_delay(self, proxy_name, test_url, timeout_ms=1500):
         enc_name = urllib.parse.quote(proxy_name, safe="")
