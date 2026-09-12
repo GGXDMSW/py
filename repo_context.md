@@ -11899,6 +11899,12 @@ class AutoHealWatcher:
         self._heal_lock = threading.Lock()
         self._healing_groups: Set[str] = set()     # 正在执行异步自愈流水线的策略组集合
         self._heal_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="AutoHealWorker")
+
+        # 主动心跳巡检双保险配置 (Proactive Heartbeat)
+        self.heartbeat_interval: float = 4.0       # 每 4 秒主动轮询一次当前在用节点
+        self.last_heartbeat_time: float = 0.0
+        self._heartbeat_lock = threading.Lock()
+        self._heartbeat_running: bool = False
         
         # Cloudflare 专属平滑自愈与防抽风参数
         self.degrade_rtt_ms: int = 280            # 哨兵探针严重劣化判定门禁 (毫秒)
@@ -12060,7 +12066,6 @@ class AutoHealWatcher:
             "mtalk.google.com",
             "signaler-pa.clients6.google.com",
             "chat-pa.clients6.google.com",
-            "antigravity-unleash.goog",
             "push.apple.com",
             "pipe.aria.microsoft.com",
             "gateway.facebook.com",
@@ -12158,6 +12163,7 @@ class AutoHealWatcher:
         blackhole_hosts: Dict[Tuple[str, str], Set[str]] = {}
         blackhole_conn_ids: Dict[Tuple[str, str], List[str]] = {}
         blackhole_stall_types: Dict[Tuple[str, str], Set[str]] = {}
+        blackhole_max_durations: Dict[Tuple[str, str], float] = {}
         active_cids: Set[str] = set()
 
         for conn in connections:
@@ -12188,16 +12194,22 @@ class AutoHealWatcher:
 
             is_stalled = False
             stall_type = ""
+            stall_duration = 0.0
 
-            # 4. Delta Rate 增量计算
+            # 4. Delta Rate 增量计算与严格四态状态机
             if cid not in self.conn_snapshots:
                 # 若 conn_id 首次出现：初始化 snapshot
-                if duration >= self.blackhole_timeout and upload > 0 and download == 0:
-                    is_stalled = True
-                    stall_type = "硬断流"
+                if upload > 0 and download == 0:
+                    stall_since = (now - duration) if duration > 0 else now
+                    if duration >= self.blackhole_timeout:
+                        is_stalled = True
+                        stall_type = "硬断流"
+                        stall_duration = duration
+                elif upload > 0:
                     stall_since = now
                 else:
                     stall_since = 0.0
+
                 self.conn_snapshots[cid] = {
                     "up": upload,
                     "down": download,
@@ -12209,14 +12221,29 @@ class AutoHealWatcher:
                 delta_up = upload - prev["up"]
                 delta_down = download - prev["down"]
                 prev["up"], prev["down"], prev["ts"] = upload, download, now
-                if (delta_up > 0 and delta_down == 0) or (upload > 0 and download == 0):
+
+                # 严格四态状态转移：
+                # (a) 若 delta_down > 0: 说明真正接收到了服务端回包，链路健康畅通，解除计时
+                if delta_down > 0:
+                    prev["stall_since"] = 0.0
+                # (b) 若 delta_up > 0: 客户端产生新上传，若此前未处于挂起状态，则置 stall_since = now
+                elif delta_up > 0:
                     if prev["stall_since"] == 0.0:
                         prev["stall_since"] = now
-                    if (now - prev["stall_since"]) >= self.blackhole_timeout:
-                        is_stalled = True
-                        stall_type = "在途软失速" if download > 0 else "硬断流"
+                # (c) 若 upload > 0 and download == 0: 纯物理发包黑洞，若未挂起则置 stall_since = now
+                elif upload > 0 and download == 0:
+                    if prev["stall_since"] == 0.0:
+                        prev["stall_since"] = now
+                # (d) 若 delta_up == 0 and delta_down == 0: 客户端处于等待服务端响应的挂起状态 (In-Flight)
+                # 【关键红线】：若此时 prev["stall_since"] > 0.0，绝对禁止重置为 0.0！必须保持原有时间戳继续累加！
                 else:
-                    prev["stall_since"] = 0.0
+                    pass
+
+                # 判定是否超时卡死
+                if prev["stall_since"] > 0.0 and (now - prev["stall_since"]) >= self.blackhole_timeout:
+                    is_stalled = True
+                    stall_type = "在途软失速" if download > 0 else "硬断流"
+                    stall_duration = now - prev["stall_since"]
 
             if is_stalled:
                 matched_grp = None
@@ -12239,11 +12266,14 @@ class AutoHealWatcher:
                     blackhole_hosts[pair_key] = set()
                     blackhole_conn_ids[pair_key] = []
                     blackhole_stall_types[pair_key] = set()
+                    blackhole_max_durations[pair_key] = 0.0
 
                 root_domain = self._get_root_domain(host)
                 blackhole_hosts[pair_key].add(root_domain or host)
                 blackhole_conn_ids[pair_key].append(cid)
                 blackhole_stall_types[pair_key].add(stall_type)
+                if stall_duration > blackhole_max_durations[pair_key]:
+                    blackhole_max_durations[pair_key] = stall_duration
 
         # 5. 清理已断开连接的 snapshot 字典，防止内存泄漏
         dead_keys = [k for k in self.conn_snapshots if k not in active_cids]
@@ -12257,8 +12287,13 @@ class AutoHealWatcher:
             pair_key = (grp, curr_n)
             distinct_hosts = blackhole_hosts.get(pair_key, set())
             stalled_conns = blackhole_conn_ids.get(pair_key, [])
-            is_suspicious = (len(distinct_hosts) >= self.min_blackhole_hosts) or (
-                len(distinct_hosts) >= 1 and len(stalled_conns) >= 3
+            max_stall_duration = blackhole_max_durations.get(pair_key, 0.0)
+
+            # 多阶自愈触发门禁：适配单应用 IDE (如反重力) 与流式大模型长连接
+            is_suspicious = (
+                (len(distinct_hosts) >= self.min_blackhole_hosts) or
+                (len(distinct_hosts) >= 1 and len(stalled_conns) >= 2) or
+                (len(stalled_conns) >= 1 and max_stall_duration >= max(3.0, self.blackhole_timeout * 1.5))
             )
 
             if is_suspicious:
@@ -12300,6 +12335,14 @@ class AutoHealWatcher:
                 f"🟢 双通道畅通 (全量: {self.current_active_node} | 非港: {self.current_active_nohk_node} | 活跃: {active_count}{yc_str})"
             )
             self._notify_status()
+
+        # 7. 主动心跳巡检双保险 (Proactive Heartbeat - 0ms 异步分发)
+        if (now - self.last_heartbeat_time) >= self.heartbeat_interval:
+            with self._heartbeat_lock:
+                if not self._heartbeat_running:
+                    self._heartbeat_running = True
+                    self.last_heartbeat_time = now
+                    self._heal_executor.submit(self._proactive_heartbeat_worker)
 
     def _async_heal_worker(
         self,
@@ -12372,6 +12415,34 @@ class AutoHealWatcher:
             with self._heal_lock:
                 self._healing_groups.discard(grp)
 
+    def _proactive_heartbeat_worker(self):
+        """
+        后台异步主动心跳巡检双保险流水线：
+        周期性轻量化探测各受监控策略组当前在用节点的可用性，
+        若检测到物理暴毙（超时 >= 99999ms），立即触发自愈切换。
+        """
+        try:
+            for grp in self.monitored_groups:
+                g_data = self.client.get_proxy(grp, timeout=0.8)
+                c_node = g_data.get("now", "")
+                if not c_node:
+                    continue
+
+                d = self.client.query_proxy_delay(c_node, self.probe_url, timeout_ms=self.probe_timeout_ms)
+                if d >= 99999:
+                    is_non_hk = ("非香港" in grp)
+                    self._execute_auto_heal(
+                        target_group=grp,
+                        dead_node=c_node,
+                        reason=f"【{grp}】主动心跳探针探测超时(>{self.probe_timeout_ms}ms物理断流)",
+                        dead_conn_ids=[],
+                        is_non_hk=is_non_hk,
+                    )
+        except Exception as e:
+            self.log(f"⚠️ [主动心跳探针异常] 巡检过程发生错误: {e}")
+        finally:
+            with self._heartbeat_lock:
+                self._heartbeat_running = False
 
     def _execute_auto_heal(
         self,
