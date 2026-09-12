@@ -131,7 +131,11 @@ class AppController(QObject):
                 favs = []
 
         if is_non_hk:
-            favs = [n for n in favs if n and not EXCLUDE_HK_REGEX.search(n)]
+            ghk_nodes = set()
+            if hasattr(self, "auto_heal_watcher") and hasattr(self.auto_heal_watcher, "google_hk_nodes"):
+                now = time.time()
+                ghk_nodes = {k for k, v in self.auto_heal_watcher.google_hk_nodes.items() if v > now}
+            favs = [n for n in favs if n and not EXCLUDE_HK_REGEX.search(n) and n not in ghk_nodes]
 
         def sort_key(name):
             sp = speeds.get(name, 0.0)

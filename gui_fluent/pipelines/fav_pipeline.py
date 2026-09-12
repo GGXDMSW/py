@@ -424,6 +424,23 @@ class FavPipelineWorker(QThread):
 
                     time.sleep(0.15)
 
+                    # 非香港赛道专属：Google 送中洁净度感知防御 (一票否决)
+                    if track_label == "非香港":
+                        try:
+                            g_req = urllib.request.Request(
+                                "https://www.google.com",
+                                headers={"User-Agent": "Mozilla/5.0"}
+                            )
+                            with speed_opener.open(g_req, timeout=2.5) as g_resp:
+                                final_gurl = g_resp.geturl()
+                                if "google.com.hk" in final_gurl:
+                                    self.log_signal.emit(
+                                        f"❌ 【Google送中一票否决】非港节点 {n} 被 Google 重定向至香港 ({final_gurl})，破坏 Gemini / IDE 合规，直接淘汰！"
+                                    )
+                                    return 0.0
+                        except Exception:
+                            pass
+
                     speed_val = 0.0
                     total_bytes = 0
                     # 消除 2.5s 硬编码截断 Bug，给予网络握手与下载充足裕量

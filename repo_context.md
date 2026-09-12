@@ -2294,7 +2294,11 @@ class AppController(QObject):
                 favs = []
 
         if is_non_hk:
-            favs = [n for n in favs if n and not EXCLUDE_HK_REGEX.search(n)]
+            ghk_nodes = set()
+            if hasattr(self, "auto_heal_watcher") and hasattr(self.auto_heal_watcher, "google_hk_nodes"):
+                now = time.time()
+                ghk_nodes = {k for k, v in self.auto_heal_watcher.google_hk_nodes.items() if v > now}
+            favs = [n for n in favs if n and not EXCLUDE_HK_REGEX.search(n) and n not in ghk_nodes]
 
         def sort_key(name):
             sp = speeds.get(name, 0.0)
@@ -9613,6 +9617,23 @@ class FavPipelineWorker(QThread):
 
                     time.sleep(0.15)
 
+                    # 非香港赛道专属：Google 送中洁净度感知防御 (一票否决)
+                    if track_label == "非香港":
+                        try:
+                            g_req = urllib.request.Request(
+                                "https://www.google.com",
+                                headers={"User-Agent": "Mozilla/5.0"}
+                            )
+                            with speed_opener.open(g_req, timeout=2.5) as g_resp:
+                                final_gurl = g_resp.geturl()
+                                if "google.com.hk" in final_gurl:
+                                    self.log_signal.emit(
+                                        f"❌ 【Google送中一票否决】非港节点 {n} 被 Google 重定向至香港 ({final_gurl})，破坏 Gemini / IDE 合规，直接淘汰！"
+                                    )
+                                    return 0.0
+                        except Exception:
+                            pass
+
                     speed_val = 0.0
                     total_bytes = 0
                     # 消除 2.5s 硬编码截断 Bug，给予网络握手与下载充足裕量
@@ -11846,6 +11867,7 @@ import re
 import threading
 import time
 import urllib.parse
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
@@ -11873,6 +11895,13 @@ class AutoHealWatcher:
         on_heal_event: Optional[Callable[[str, str, dict], None]] = None,
         on_status_update: Optional[Callable[[dict], None]] = None,
         log_fn: Optional[Callable[[str], None]] = None,
+        check_interval: float = 1.0,
+        idle_timeout_seconds: float = 5.0,
+        cooldown_duration: float = 900.0,
+        min_switch_interval: float = 8.0,
+        probe_timeout_ms: int = 1500,
+        probe_url: str = "https://www.google.com/generate_204",
+        min_blackhole_hosts: int = 2,
     ):
         self.client = client or ClashClient()
         self.get_candidates_fn = get_candidates_fn
@@ -11880,12 +11909,12 @@ class AutoHealWatcher:
         self.on_status_update = on_status_update
         self.log_fn = log_fn
 
-        # 核心超高速敏捷参数配置
+        # 核心探测参数
         self.enabled: bool = True
-        self.check_interval: float = 1.0           # 轮询探测心跳提升至 1.0 秒 (毫秒级敏捷响应)
-        self.blackhole_timeout: float = 2.0        # 单向黑洞判定时长缩短至 2.0 秒 (超敏捷捕获)
-        self.min_blackhole_hosts: int = 2          # 触发判定所需的最少并发异构域名数
-        self.probe_timeout_ms: int = 1200          # 哨兵微探针超时对齐客户端 (1200ms 容纳 VLESS TLS 冷启动与首包重传，彻底消除假超时)
+        self.check_interval: float = max(0.5, float(check_interval))
+        self.idle_timeout_seconds: float = float(idle_timeout_seconds)
+        self.min_blackhole_hosts: int = max(1, int(min_blackhole_hosts))
+        self.probe_timeout_ms: int = max(500, int(probe_timeout_ms))
         self.cooldown_duration: float = 900.0      # 坏死节点临时熔断冷冻时长 (秒, 默认15分钟)
         self.min_switch_interval: float = 8.0      # 连续自愈最小时间间隔 (防雪崩/防抖动)
         self.conn_snapshots: Dict[str, dict] = {}  # {conn_id: {"up": int, "down": int, "ts": float, "stall_since": float}}
@@ -11893,7 +11922,7 @@ class AutoHealWatcher:
             "https://www.google.com/generate_204",
             "https://www.gstatic.com/generate_204",
         ]
-        self.probe_url: str = self.probe_urls[0]
+        self.probe_url: str = probe_url
 
         # 【主循环彻底解耦与防抖核心】
         self._heal_lock = threading.Lock()
@@ -11912,6 +11941,14 @@ class AutoHealWatcher:
         self.strike_window: float = 60.0          # 黄牌累积计分窗口 (秒)
         self.yellow_cards: Dict[str, float] = {}  # {node_name: last_strike_timestamp}
         self.soft_stall_bytes_limit: int = 3072   # 软失速下行速率下限 (字节/秒, 约3KB/s)
+
+        # Google 送中感知冷冻黑名单与探针防御 (防香港 Anycast 导致 Gemini / IDE 报 403)
+        self.google_hk_nodes: Dict[str, float] = {
+            "东京 NRT 11.40 MB/s 3": time.time() + 86400,
+            "东京 NRT 5.94 MB/s": time.time() + 86400,
+            "东京 NRT 9.41 MB/s": time.time() + 86400,
+        }
+        self._last_google_check: Dict[str, float] = {}  # {node_name: last_check_ts}
         
         # 守护的核心策略组清单
         self.monitored_groups: List[str] = [
@@ -12018,6 +12055,7 @@ class AutoHealWatcher:
         now = time.time()
         active_cooldowns = {k: int(v - now) for k, v in self.cooldown_nodes.items() if v > now}
         active_yellow_cards = {k: int(v + self.strike_window - now) for k, v in self.yellow_cards.items() if (v + self.strike_window) > now}
+        active_google_hk = {k: int(v - now) for k, v in self.google_hk_nodes.items() if v > now}
         return {
             "enabled": self.enabled,
             "running": self.is_running(),
@@ -12031,6 +12069,8 @@ class AutoHealWatcher:
             "cooldown_nodes": active_cooldowns,
             "yellow_cards_count": len(active_yellow_cards),
             "yellow_cards": active_yellow_cards,
+            "google_hk_nodes_count": len(active_google_hk),
+            "google_hk_nodes": active_google_hk,
         }
 
     def _parse_start_time(self, start_str: str) -> float:
@@ -12431,14 +12471,75 @@ class AutoHealWatcher:
         """
         后台异步主动心跳巡检双保险流水线：
         周期性轻量化双探针竞速探测各受监控策略组当前在用节点的可用性，
-        若检测到物理暴毙（超时 >= 99999ms），抓取坏死连接并立即触发自愈切换。
+        若检测到物理暴毙（超时 >= 99999ms）或非港出口触发 Google 送中，抓取坏死连接并立即触发自愈切换。
         """
         try:
+            now = time.time()
             for grp in self.monitored_groups:
                 g_data = self.client.get_proxy(grp, timeout=0.8)
                 c_node = g_data.get("now", "")
                 if not c_node:
                     continue
+
+                is_non_hk = ("非香港" in grp)
+
+                # (0) 非香港策略组专属：Google 送中洁净度感知防御双保险
+                if is_non_hk:
+                    is_google_hk = False
+                    if c_node in self.google_hk_nodes and self.google_hk_nodes[c_node] > now:
+                        is_google_hk = True
+                    elif (now - self._last_google_check.get(c_node, 0.0)) >= 30.0:
+                        self._last_google_check[c_node] = now
+                        try:
+                            mix_port = self.client.get_mixed_port(default=7897)
+                            proxy_handler = urllib.request.ProxyHandler({
+                                "http": f"http://127.0.0.1:{mix_port}",
+                                "https": f"http://127.0.0.1:{mix_port}",
+                            })
+                            opener = urllib.request.build_opener(proxy_handler)
+                            g_req = urllib.request.Request("https://www.google.com", headers={"User-Agent": "Mozilla/5.0"})
+                            with opener.open(g_req, timeout=2.0) as g_resp:
+                                final_u = g_resp.geturl()
+                                if "google.com.hk" in final_u:
+                                    is_google_hk = True
+                                    self.google_hk_nodes[c_node] = now + 43200
+                                    self.log(f"🚨 [Google送中感知] 节点 【{c_node}】 访问 google.com 被重定向至 {final_u}，触发非港自愈冷冻！")
+                        except Exception:
+                            pass
+
+                    if is_google_hk:
+                        with self._heal_lock:
+                            if grp in self._healing_groups:
+                                continue
+                            if (now - self.last_heal_timestamp) < self.min_switch_interval:
+                                continue
+                            self._healing_groups.add(grp)
+
+                        try:
+                            dead_cids = []
+                            try:
+                                conns_data = self.client.get_connections(timeout=1.2)
+                                if conns_data and isinstance(conns_data, dict):
+                                    for conn in conns_data.get("connections", []):
+                                        chains = conn.get("chains", [])
+                                        if c_node in chains or (chains and chains[0] == c_node):
+                                            cid = conn.get("id")
+                                            if cid:
+                                                dead_cids.append(cid)
+                            except Exception:
+                                dead_cids = []
+
+                            self._execute_auto_heal(
+                                target_group=grp,
+                                dead_node=c_node,
+                                reason=f"【{grp}】节点触发 Google 送中 (.hk) 违规熔断，保护 Gemini / IDE 会话",
+                                dead_conn_ids=dead_cids,
+                                is_non_hk=True,
+                            )
+                        finally:
+                            with self._heal_lock:
+                                self._healing_groups.discard(grp)
+                        continue
 
                 # (a) 双探针竞速探测
                 d = 99999
@@ -12450,7 +12551,6 @@ class AutoHealWatcher:
                         break
 
                 if d >= 99999:
-                    now = time.time()
                     with self._heal_lock:
                         if grp in self._healing_groups:
                             continue  # 被动异步工作线程已在处理该组自愈，主动心跳主动让行，杜绝重复触发
@@ -12474,7 +12574,6 @@ class AutoHealWatcher:
                             dead_cids = []
 
                         # (c) 传入 dead_conn_ids 立即并发清退，触发客户端瞬间重连
-                        is_non_hk = ("非香港" in grp)
                         self._execute_auto_heal(
                             target_group=grp,
                             dead_node=c_node,
@@ -12523,8 +12622,10 @@ class AutoHealWatcher:
         switch_cost_ms = (time.perf_counter() - t0) * 1000
 
         if switched:
-            # 步骤 3：坏死节点冷冻熔断 15 分钟
+            # 步骤 3：坏死节点冷冻熔断 15 分钟 (若触发 Google 送中则冷冻 12 小时)
             self.cooldown_nodes[dead_node] = now + self.cooldown_duration
+            if is_non_hk and ("Google 送中" in reason or dead_node in self.google_hk_nodes):
+                self.google_hk_nodes[dead_node] = max(self.google_hk_nodes.get(dead_node, 0.0), now + 43200)
             self.healed_count += 1
             self.last_heal_timestamp = now
 
@@ -12606,9 +12707,13 @@ class AutoHealWatcher:
             if not all_members:
                 continue
 
-            # (b) 区域合规过滤
+            # (b) 区域合规过滤 (非港组剔除香港节点及被 Google 送中冷冻的节点)
             if is_non_hk:
-                valid_members = [c for c in all_members if c and not EXCLUDE_HK_REGEX.search(c)]
+                valid_members = [
+                    c for c in all_members
+                    if c and not EXCLUDE_HK_REGEX.search(c)
+                    and (c not in self.google_hk_nodes or self.google_hk_nodes[c] <= now)
+                ]
             else:
                 valid_members = [c for c in all_members if c]
 
@@ -12653,6 +12758,8 @@ class AutoHealWatcher:
         # 1. 优先直接从内存热备队列中取出首个非死且真实存在的未冷冻节点 (0 毫秒开销)
         cached = self.standby_cache.get(target_group, [])
         for cand in cached:
+            if is_non_hk and cand in self.google_hk_nodes and self.google_hk_nodes[cand] > now:
+                continue
             if cand and cand != exclude_node and (cand not in self.cooldown_nodes or self.cooldown_nodes[cand] <= now):
                 return cand
 
@@ -12662,9 +12769,13 @@ class AutoHealWatcher:
         if not all_members:
             return None
 
-        # (b) 区域合规过滤
+        # (b) 区域合规过滤 (非港组剔除香港节点及被 Google 送中冷冻的节点)
         if is_non_hk:
-            valid_members = [c for c in all_members if c and not EXCLUDE_HK_REGEX.search(c)]
+            valid_members = [
+                c for c in all_members
+                if c and not EXCLUDE_HK_REGEX.search(c)
+                and (c not in self.google_hk_nodes or self.google_hk_nodes[c] <= now)
+            ]
         else:
             valid_members = [c for c in all_members if c]
 
