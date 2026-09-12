@@ -42,12 +42,14 @@ class AutoHealWatcher:
         probe_timeout_ms: int = 1500,
         probe_url: str = "https://www.google.com/generate_204",
         min_blackhole_hosts: int = 2,
+        is_pipeline_running_fn: Optional[Callable[[], bool]] = None,
     ):
         self.client = client or ClashClient()
         self.get_candidates_fn = get_candidates_fn
         self.on_heal_event = on_heal_event
         self.on_status_update = on_status_update
         self.log_fn = log_fn
+        self.is_pipeline_running_fn = is_pipeline_running_fn
 
         # 核心探测参数
         self.enabled: bool = True
@@ -196,12 +198,15 @@ class AutoHealWatcher:
         active_cooldowns = {k: int(v - now) for k, v in self.cooldown_nodes.items() if v > now}
         active_yellow_cards = {k: int(v + self.strike_window - now) for k, v in self.yellow_cards.items() if (v + self.strike_window) > now}
         active_google_hk = {k: int(v - now) for k, v in self.google_hk_nodes.items() if v > now}
+        status_summary = self.current_status_summary
+        if callable(self.is_pipeline_running_fn) and self.is_pipeline_running_fn():
+            status_summary = "⏸️ 优选测速中 (心跳探针自动避让)"
         return {
             "enabled": self.enabled,
             "running": self.is_running(),
             "active_node": self.current_active_node,
             "active_nohk_node": self.current_active_nohk_node,
-            "status_summary": self.current_status_summary,
+            "status_summary": status_summary,
             "healed_count": self.healed_count,
             "last_heal_time": self.last_heal_timestamp,
             "last_heal_info": self.last_heal_info,
@@ -326,6 +331,11 @@ class AutoHealWatcher:
                 pass
 
     def _check_and_heal(self):
+        if callable(self.is_pipeline_running_fn) and self.is_pipeline_running_fn():
+            self.current_status_summary = "⏸️ 优选测速中 (心跳探针自动避让)"
+            self._notify_status()
+            return
+
         now = time.time()
 
         # 1. 轻量拉取各组当前在用节点（调用 self.client.get_proxy(grp)）
@@ -613,6 +623,11 @@ class AutoHealWatcher:
         周期性轻量化双探针竞速探测各受监控策略组当前在用节点的可用性，
         若检测到物理暴毙（超时 >= 99999ms）或非港出口触发 Google 送中，抓取坏死连接并立即触发自愈切换。
         """
+        if callable(self.is_pipeline_running_fn) and self.is_pipeline_running_fn():
+            self.current_status_summary = "⏸️ 优选测速中 (心跳探针自动避让)"
+            self._notify_status()
+            return
+
         try:
             now = time.time()
             for grp in self.monitored_groups:
@@ -691,6 +706,19 @@ class AutoHealWatcher:
                         break
 
                 if d >= 99999:
+                    # 二次复验防抖机制：首次超时后等待 500ms 重试确认，两次均超时方判定为暴毙
+                    time.sleep(0.5)
+                    d2 = 99999
+                    for u in self.probe_urls:
+                        cur_d2 = self.client.query_proxy_delay(c_node, u, timeout_ms=self.probe_timeout_ms)
+                        if cur_d2 < d2:
+                            d2 = cur_d2
+                        if d2 < self.degrade_rtt_ms:
+                            break
+                    if d2 < 99999:
+                        # 二次复验恢复健康，安全放行
+                        continue
+
                     with self._heal_lock:
                         if grp in self._healing_groups:
                             continue  # 被动异步工作线程已在处理该组自愈，主动心跳主动让行，杜绝重复触发

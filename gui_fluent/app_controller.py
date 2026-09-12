@@ -101,6 +101,7 @@ class AppController(QObject):
             on_heal_event=self._on_auto_heal_event,
             on_status_update=self._on_auto_heal_status_update,
             log_fn=self.log,
+            is_pipeline_running_fn=self.is_pipeline_running,
         )
         self.auto_heal_watcher.start()
 
@@ -543,6 +544,10 @@ class AppController(QObject):
         def _on_auto_finished(ok, desc):
             if ok and hasattr(self, "_scheduler") and self._scheduler:
                 self._scheduler.update_last_run(full_ts=time.time())
+            if hasattr(self, "auto_heal_watcher") and self.auto_heal_watcher:
+                self.auto_heal_watcher.last_heal_timestamp = time.time() - self.auto_heal_watcher.min_switch_interval
+                self.auto_heal_watcher.current_status_summary = "正常守护中"
+                self.auto_heal_watcher._notify_status()
             self.pipeline_finished.emit(ok, desc)
 
         self._pipeline_worker.finished_signal.connect(_on_auto_finished)
@@ -578,6 +583,10 @@ class AppController(QObject):
         def _on_fav_finished(ok, desc):
             if ok and hasattr(self, "_scheduler") and self._scheduler:
                 self._scheduler.update_last_run(fav_ts=time.time())
+            if hasattr(self, "auto_heal_watcher") and self.auto_heal_watcher:
+                self.auto_heal_watcher.last_heal_timestamp = time.time() - self.auto_heal_watcher.min_switch_interval
+                self.auto_heal_watcher.current_status_summary = "正常守护中"
+                self.auto_heal_watcher._notify_status()
             self.fav_pipeline_finished.emit(ok, desc)
 
         self._fav_pipeline_worker.finished_signal.connect(_on_fav_finished)
