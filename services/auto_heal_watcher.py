@@ -283,12 +283,24 @@ class AutoHealWatcher:
         return f"{parts[-2]}.{parts[-1]}"
 
     def _loop(self):
+        prev_loop_ts = time.time()
         while self._running:
             try:
                 time.sleep(self.check_interval)
                 if not self.enabled:
                     self.current_status_summary = "已暂停守护"
+                    prev_loop_ts = time.time()
                     continue
+
+                now = time.time()
+                # 检测系统休眠/挂起唤醒或时间大跳变 (实际间隔严重超出预期步长 8.0 秒以上)
+                if (now - prev_loop_ts) > 8.0:
+                    prev_loop_ts = now
+                    self.conn_snapshots.clear()
+                    self.last_heartbeat_time = now + 2.0  # 延后主动心跳，给予网卡 Wi-Fi 2~3 秒握手缓冲
+                    self.log("💤 [休眠唤醒保护] 检测到系统唤醒或时间跳变，已重置监控快照并给予网卡 3 秒重连缓冲")
+                    continue
+                prev_loop_ts = now
 
                 self._check_and_heal()
             except Exception:
@@ -599,29 +611,41 @@ class AutoHealWatcher:
                         break
 
                 if d >= 99999:
-                    # (b) 确认物理暴毙，主动从内核抓取当前所有活跃连接，提取挂在该坏死节点上的连接 ID
-                    dead_cids = []
-                    try:
-                        conns_data = self.client.get_connections(timeout=1.2)
-                        if conns_data and isinstance(conns_data, dict):
-                            for conn in conns_data.get("connections", []):
-                                chains = conn.get("chains", [])
-                                if c_node in chains or (chains and chains[0] == c_node):
-                                    cid = conn.get("id")
-                                    if cid:
-                                        dead_cids.append(cid)
-                    except Exception:
-                        dead_cids = []
+                    now = time.time()
+                    with self._heal_lock:
+                        if grp in self._healing_groups:
+                            continue  # 被动异步工作线程已在处理该组自愈，主动心跳主动让行，杜绝重复触发
+                        if (now - self.last_heal_timestamp) < self.min_switch_interval:
+                            continue  # 处于避震窗口期，跳过
+                        self._healing_groups.add(grp)
 
-                    # (c) 传入 dead_conn_ids 立即并发清退，触发客户端瞬间重连
-                    is_non_hk = ("非香港" in grp)
-                    self._execute_auto_heal(
-                        target_group=grp,
-                        dead_node=c_node,
-                        reason=f"【{grp}】主动心跳探针探测超时(>{self.probe_timeout_ms}ms物理断流)",
-                        dead_conn_ids=dead_cids,
-                        is_non_hk=is_non_hk,
-                    )
+                    try:
+                        # (b) 确认物理暴毙，主动从内核抓取当前所有活跃连接，提取挂在该坏死节点上的连接 ID
+                        dead_cids = []
+                        try:
+                            conns_data = self.client.get_connections(timeout=1.2)
+                            if conns_data and isinstance(conns_data, dict):
+                                for conn in conns_data.get("connections", []):
+                                    chains = conn.get("chains", [])
+                                    if c_node in chains or (chains and chains[0] == c_node):
+                                        cid = conn.get("id")
+                                        if cid:
+                                            dead_cids.append(cid)
+                        except Exception:
+                            dead_cids = []
+
+                        # (c) 传入 dead_conn_ids 立即并发清退，触发客户端瞬间重连
+                        is_non_hk = ("非香港" in grp)
+                        self._execute_auto_heal(
+                            target_group=grp,
+                            dead_node=c_node,
+                            reason=f"【{grp}】主动心跳探针探测超时(>{self.probe_timeout_ms}ms物理断流)",
+                            dead_conn_ids=dead_cids,
+                            is_non_hk=is_non_hk,
+                        )
+                    finally:
+                        with self._heal_lock:
+                            self._healing_groups.discard(grp)
         except Exception as e:
             self.log(f"⚠️ [主动心跳探针异常] 巡检过程发生错误: {e}")
         finally:
@@ -685,20 +709,29 @@ class AutoHealWatcher:
             log_msg = f"✨ [优雅引流完成] 策略组 【{target_group}】 耗时 {switch_cost_ms:.1f}ms 顺移至备选节点 【{backup_node}】！{non_hk_tip}"
             self.log(log_msg)
 
-            # 步骤 4：异步平滑并发清退 —— 使用 ThreadPoolExecutor 并发向内核提交 DELETE 请求
+            # 步骤 4：异步平滑并发清退 —— 双保险真空吸尘器
             def _delayed_drain():
-                valid_cids = [cid for cid in dead_conn_ids if cid]
-                if not valid_cids:
-                    return
                 evicted_count = 0
+                # 1. 优先并发斩断预先抓取到的指定死连接 ID
+                valid_cids = [cid for cid in dead_conn_ids if cid]
+                if valid_cids:
+                    try:
+                        with ThreadPoolExecutor(max_workers=8) as pool:
+                            results = list(pool.map(lambda cid: self.client.close_connection(cid, timeout=0.8), valid_cids))
+                            evicted_count += sum(1 for r in results if r)
+                    except Exception:
+                        pass
+
+                # 2. 毫秒级二次真空扫尾：调用底层 close_connections_by_proxy 切断任何残留或刚产生的孤儿连接
                 try:
-                    with ThreadPoolExecutor(max_workers=8) as pool:
-                        results = list(pool.map(lambda cid: self.client.close_connection(cid, timeout=0.8), valid_cids))
-                        evicted_count = sum(1 for r in results if r)
+                    time.sleep(0.1)  # 给予 100ms 裕量让策略组路由完全生效
+                    extra_closed = self.client.close_connections_by_proxy(dead_node, timeout=1.2)
+                    evicted_count += extra_closed
                 except Exception:
                     pass
+
                 if evicted_count > 0:
-                    self.log(f"🔪 [定点扫尾] 已并发精准清理旧节点 【{dead_node}】 遗留的 {evicted_count} 条死锁僵尸连接")
+                    self.log(f"🔪 [定点扫尾] 已双重并发精准清理旧节点 【{dead_node}】 遗留的 {evicted_count} 条死锁僵尸连接")
 
             threading.Thread(target=_delayed_drain, daemon=True, name="HealDrainThread").start()
 
