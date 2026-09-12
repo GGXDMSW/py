@@ -1,6 +1,153 @@
-# Repository Context
+# 🌌 反重力平台 py 项目「绝对上帝视角」架构总图 (God-View Architecture Map)
 
-This file contains the complete, un-truncated source code of the repository to provide a full context.
+> **致下一任 AI 架构师**：
+> 本文件是本项目的最高级别系统全景认知枢纽。请务必优先精读本章节，它将赋予你对整个代码库拓扑链路、并发锁分布、状态生命周期与不可违背的底层红线 **100% 的掌控权**。阅读完毕后即可达到零损耗接手、精准决策与系统级架构治理。
+
+---
+
+## 一、 全局拓扑链路与模块调用流向
+
+本系统是一套专为 **Clash Verge Rev** 量身打造的高性能、自动化节点优选、全链路状态守护与秒级无感自愈中枢。整体遵循 **分层解耦、单向依赖、Controller中枢编排、双引擎热重载** 的企业级工程架构。
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                                    应用启动层 (Launchers)                                  │
+│   main.py (环境自检/引导) ──► main_fluent.py (PyQt6 Fluent Design) ──► gemini-code (兼容层) │
+└────────────────────────────────────────────┬─────────────────────────────────────────────┘
+                                             │
+                                             ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                               核心协调与编排层 (Orchestration)                             │
+│                         gui_fluent/app_controller.py (AppController)                     │
+│   ┌────────────────────────────────────────┼────────────────────────────────────────┐    │
+│   ▼                                        ▼                                        ▼    │
+│ [全局状态中枢]                      [业务管道流水线]                          [后台哨兵守护]  │
+│ core/state_manager.py              gui_fluent/pipelines/                    services/    │
+│ (StateManager 线程安全状态)        ├── auto_pipeline.py (全量大优选)       auto_heal_   │
+│ core/signal_bus.py                 └── fav_pipeline.py  (优质复测留任)       watcher.py   │
+│ (SignalBus 事件解耦总线)                                                    (秒级无感自愈)│
+└────────────────────────────────────────────┬─────────────────────────────────────────────┘
+                                             │
+                                             ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 底层领域服务层 (Domain Services)                           │
+│   services/clash_client.py         ─── Mihomo/Clash 核心 REST API (节点切换/延时/连接监控)     │
+│   services/colo_service.py         ─── Cloudflare 物理机房嗅探、历史统计、防漂移与亚洲节点判定 │
+│   services/script_generator.py     ─── Script.js 动态生成、物理端点拦截、规范更名、双引擎同步  │
+│   services/subscription_service.py ─── 订阅 YAML 解析、物理端点去重提取、节点名称规范化对齐    │
+│   services/pool_service.py         ─── 精选池、典藏池、黑名单多池聚合计算与配额分配算法       │
+│   services/filter_service.py       ─── 抖动率过滤、健康度巡检、低速黑名单过滤                 │
+│   services/probe_service.py        ─── HTTP 微探针、真实下行带宽测速引擎                     │
+└────────────────────────────────────────────┬─────────────────────────────────────────────┘
+                                             │
+                                             ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                                配置、工具与外部内核交互层 (Infra)                          │
+│   config/settings.py               ─── 路径定位、系统参数常量、深色主题、正则排除规则          │
+│   config/config_manager.py         ─── node_assistant_config.json 原子保存与互斥锁安全读取    │
+│   utils/win32_utils.py             ─── Win32 全局热键 Ctrl+Shift+F12 模拟、进程与注册表管理   │
+│   外部系统对接                      ─── Mihomo Core (9097 API) & Clash Verge Rev (Script.js)  │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 关键数据与指令流向：
+1. **启动与状态恢复**：`main_fluent.py` 实例化 `AppController` -> `AppController` 从 `config_manager` 安全加载 `node_assistant_config.json` 注入 `StateManager` -> 初始化 UI 并启动后台守护线程。
+2. **全量大优选流程**：`auto_pipeline.py` 从云端/本地拉取订阅 -> 并发调用 `subscription_service` 提取去重物理端点 -> 调用 `colo_service` 嗅探真实机房代码 (HKG, NRT 等) -> 过滤漂移节点 -> 调用 `probe_service` 进行真实文件下行带宽测速 -> 将达标节点冠名（如 `香港 HKG 22.56 MB/s`）入驻精选池与 `cloud_endpoints` 字典 -> 调用 `script_generator` 生成 `Script.js` 并执行双引擎内核热重载。
+3. **秒级无感自愈流程**：`auto_heal_watcher.py` 后台 1.0s 旁路轮询 Mihomo `/connections` 连接表 -> 发现单向发包黑洞或软失速 -> 外科手术式 `DELETE /connections/{id}` 断开坏死连接 -> 在策略组内无感秒级顺位切换至健康低延迟节点（严格隔离非香港与香港池）-> 坏死节点临时熔断冷冻 15 分钟。
+
+---
+
+## 二、 状态与并发生命周期 (State & Concurrency Lifecycle)
+
+### 1. StateManager 核心数据结构
+`core/state_manager.py` 中的 `StateManager` 是整个应用的唯一事实源 (Single Source of Truth)：
+- `favorites`: `set[str]` - 优质精选节点名称集合。
+- `stars_nodes`: `list[dict]` - 典藏常青极品池清单。
+- `all_nodes`: `list[str]` - 订阅中的物理端点去重全量节点名称列表。
+- `node_details`: `dict[str, dict]` - 节点详情映射（包含 `server`, `port`, `type`, `uuid` 等原始物理参数）。
+- `cloud_endpoints`: `dict[str, str]` - 物理端点 (`IP:Port`) -> 规范化名称（如 `"23.133.52.10:2053": "香港 HKG 22.56 MB/s"`），拥有最高霸占优先级。
+- `node_colo`: `dict[str, str]` - 端点/节点 -> 物理机房代码（如 `"HKG"`, `"NRT"`）。
+- `node_colo_history`: `dict[str, list]` - 7 天机房历史检测记录，用于长效防漂移。
+- `local_blacklist` & `speed_blacklist`: `set[str]` - 延迟超标与下行低速黑名单集合。
+
+### 2. 并发模型与锁 (Lock) 分布规则
+系统涉及多个并发执行上下文：
+- **GUI 主线程**：运行 PyQt6 响应式事件循环，负责所有界面交互与渲染。
+- **Pipeline 工作线程**：`AutoPipeline` (QThread)、`FavPipeline` (QThread)，负责长时间测速与优选计算。
+- **Sentinel 哨兵线程**：`AutoHealWatcher` (threading.Thread)，常驻后台进行毫秒级链路感知。
+- **定时调度线程**：`Scheduler` (threading.Thread)，处理定时自动优选。
+
+#### ⚠️ 死锁防范与锁粒度黄金军规：
+1. **统一锁接口**：`StateManager` 内置私有递归互斥锁 `_global_lock`，对外通过 `@property def lock(self): return self._global_lock` 暴露。所有线程必须统一通过 `with self.state.lock:` 或 `with self.controller.state.lock:` 获取锁。
+2. **锁内严禁同步阻塞 I/O**：绝对禁止在持有 `state.lock` 时调用网络请求（如 `requests.get`、下行测速、`time.sleep`）或弹出 GUI 阻塞对话框（如 `QMessageBox.exec()`）。
+3. **快照分离模式 (Snapshot Pattern)**：
+   ```python
+   # 正确范式：锁内快照，锁外耗时操作
+   with self.state.lock:
+       fav_snapshot = set(self.state.favorites)
+       details_snapshot = dict(self.state.node_details)
+   
+   # 锁外执行耗时网络测速
+   results = perform_speed_tests(fav_snapshot, details_snapshot)
+   
+   # 结果回写再短暂入锁
+   with self.state.lock:
+       self.state.favorites.update(results.qualified)
+   ```
+4. **协作式优雅终止 (Stop Event)**：严禁使用 `terminate()` 或系统级暴力杀线程。统一调用 `self.state.get_stop_event(name)` 获取 `threading.Event`，流水线循环内检测 `if stop_event.is_set(): break` 实现安全收尾与状态自愈。
+
+---
+
+## 三、 模块边界与底层契约 (Architecture Red Lines & Contracts)
+
+### 1. 目录依赖架构红线（绝对不可逾越）
+- **红线 1（严格单向分层，严禁反向污染）**：
+  `services` 和 `config` 属于纯粹的基础设施与算法层，**绝对严禁导入任何 GUI 模块**（无论是 `gui` 还是 `gui_fluent`）。基础模块必须能够在无任何 UI 的 Headless 环境下独立进行单元测试。
+- **红线 2（View-Controller 严格隔离）**：
+  所有界面层组件（`pages/`、`widgets/`、`components/`）只负责数据渲染与事件触发，**绝对严禁直接调用底层 `services` 或直接执行文件写盘**。所有业务操作必须通过委托 `self.controller.<method>()` 执行。
+- **红线 3（物理机房级绝对防御契约）**：
+  对非香港策略组（`⚡ 自动选择 (非香港)`）的过滤，**绝不允许仅依赖节点名称字符串正则**！必须将由 Python 端嗅探到的物理香港机房端点黑名单（`hkEndpoints`）注入脚本，在物理端点层实施一票否决。
+- **红线 4（规范命名唯一霸占契约）**：
+  由系统冠名并收录于 `cloud_endpoints` 的规范名称（如 `香港 HKG 22.56 MB/s`），在全局任何订阅解析（`load_nodes_from_profile`）与状态对齐（`reconcile_endpoints`）中**具备最高霸占优先级**，严禁逆向降级还原回机场原始未清洗的广告名称。
+
+### 2. 系统核心设计模式
+- **Controller 协调器模式**：`gui_fluent/app_controller.py` 作为全系统总调度中枢，统一协调状态持久化、UI 信号转发、流水线启停与内核重载。
+- **Pipeline 管道模式**：`auto_pipeline.py` 与 `fav_pipeline.py` 将复杂的测活、测速、校准、入池与热载步骤分解为标准管道阶段。
+- **Observer 观察者模式**：通过 `SignalBus` 与 PyQt6 Signals 实现后台任务进度、日志、状态向界面的解耦通知。
+- **Sentinel 哨兵自愈模式**：`auto_heal_watcher.py` 以后台旁路方式进行零流量损耗的真实连接感知与断流自愈。
+- **Dual-Engine 双引擎热更模式**：`Script.js`（动态规则注入） + `clash-verge.yaml`（原子覆盖并通知 API 热重载），彻底攻克快捷键穿透失败的边界场景。
+
+---
+
+## 四、 近期关键排雷与核心修复纪要 (Critical Bug Post-Mortems)
+
+### 1. StateManager 缺少 lock 属性导致多线程崩溃闪退
+- **事故现象**：在 Fluent 界面下启动大优选或复测时，程序瞬间崩溃闪退。
+- **底层根因**：`StateManager` 原本私有锁命名为 `_global_lock`，但在模块化重构时，Controller 和各 Pipeline 广泛采用了 `with self.state.lock:`。当多线程并发执行时，直接抛出 `AttributeError: 'StateManager' object has no attribute 'lock'`，未捕获异常导致 Python 进程直接退出。
+- **解决方案**：在 `core/state_manager.py` 中为 `StateManager` 添加 `@property def lock(self): return self._global_lock`，确保所有多线程上下文安全、平滑地获得线程锁保护。
+
+### 2. 香港节点因机场广告名伪装穿透「⚡ 自动选择 (非香港)」策略组
+- **事故现象**：全量大优选后，用户发现非香港组首位赫然排着 `Mia优选 | 09-12 19:32 | BestCF.pages.dev`，不仅没改名，而且物理机房实际为香港 HKG。
+- **底层根因**：
+  1. `Script.js` 中的 `isNonHongKongProxy` 纯粹依赖名称正则 `/(香港|HK|Hong\s*Kong)/i`，而机场原始名字脱敏不带任何地区词，导致正则一票否决失效；
+  2. 生成 `Script.js` 时未在 `config.proxies` 内存中覆盖 `p.name`；
+  3. `reconcile_endpoints` 在对齐时把已命名的 `香港 HKG 22.56 MB/s` 反向还原为了原始订阅中的怪名字。
+- **解决方案**：
+  1. **物理端点黑名单硬核拦截**：在 `services/script_generator.py` 中聚合已知香港端点注入 `hkEndpoints`（收录 808 个端点），在 `isNonHongKongProxy` 中实施物理端点 `hkEndpoints.includes(ep)` 一票否决；
+  2. **内存规范更名注入**：在 `Script.js` 步骤 0 中引入 `canonicalNameMap`，遍历 `config.proxies` 时自动将其覆盖更名为规范名称（如 `香港 HKG 22.56 MB/s`）；
+  3. **消除反向降级**：修复 `reconcile_endpoints`，锁定 `cloud_endpoints` 规范命名优先权。
+
+### 3. YouTube Shorts 播放中途短暂断流转圈（DNS Fake-IP 与流媒体加固）
+- **事故现象**：播放 YouTube 视频时前几秒秒开，随后第 10 秒发生几秒卡顿转圈才继续复播。
+- **底层根因**：Clash Verge 的 DNS 缺少 `enhanced-mode: fake-ip`，且 `fallback-filter` 缺少 `googlevideo.com` 等流媒体 CDN 域名，导致国内公共 DNS 解析分片域名时遭受 GFW 投毒返回 Facebook 虚假 IP（HTTP 404），引发播放器卡顿重试。
+- **解决方案**：在 `services/script_generator.py` 的脚本模板与 `sync_runtime_clash_yaml_and_reload` 中固化 `enhanced-mode: fake-ip` 与完整流媒体白名单，实现 0 毫秒虚拟 IP 极速下发，彻底免疫 DNS 污染。
+
+---
+
+## 五、 全局源码全量打包索引 (Source Manifest)
+以下为当前代码库中所有非忽略源码文件的完整内容（未做任何截断），供全局审阅与深度代码级追踪：
+
+
 
 ## File: `AGENTS.md`
 
@@ -8,7 +155,7 @@ This file contains the complete, un-truncated source code of the repository to p
 # Bark 自动通知规则
 
 每当当前任务完全结束、遇到报错中断、或者需要用户的输入/权限选择时，请立刻在后台静默运行以下 curl 命令发送 Bark 通知：
-curl.exe -s "https://api.day.app/LRsc3PP2H5hkrBcBoxssd7/Antigravity通知/任务状态已更新，请回IDE处理"
+curl.exe --noproxy "*" -s "https://api.day.app/LRsc3PP2H5hkrBcBoxssd7/Antigravity%E9%80%9A%E7%9F%A5/%E4%BB%BB%E5%8A%A1%E7%8A%B6%E6%80%81%E5%B7%B2%E6%9B%B4%E6%96%B0%EF%BC%8C%E8%AF%B7%E5%9B%9EIDE%E5%A4%84%E7%90%86"
 ```
 
 ## File: `auto_packer.py`
@@ -17,7 +164,7 @@ curl.exe -s "https://api.day.app/LRsc3PP2H5hkrBcBoxssd7/Antigravity通知/任务
 import os
 
 def is_ignored(path):
-    ignored_dirs = {'.git', '__pycache__', '.idea', '.vscode', 'venv', 'env', 'node_modules', 'dist', 'build', 'gui'}
+    ignored_dirs = {'.git', '__pycache__', '.idea', '.vscode', 'venv', 'env', 'node_modules', 'dist', 'build', 'gui', 'scratch'}
     ignored_exts = {'.pyc', '.pyd', '.exe', '.dll', '.so', '.dylib', '.png', '.jpg', '.jpeg', '.gif', '.zip', '.tar', '.gz', '.ico', '.pdf', '.bak', '.json', '.txt', '.log'}
     
     parts = path.split(os.sep)
@@ -33,17 +180,169 @@ def is_ignored(path):
         
     return False
 
+GOD_VIEW_MAP = """# 🌌 反重力平台 py 项目「绝对上帝视角」架构总图 (God-View Architecture Map)
+
+> **致下一任 AI 架构师**：
+> 本文件是本项目的最高级别系统全景认知枢纽。请务必优先精读本章节，它将赋予你对整个代码库拓扑链路、并发锁分布、状态生命周期与不可违背的底层红线 **100% 的掌控权**。阅读完毕后即可达到零损耗接手、精准决策与系统级架构治理。
+
+---
+
+## 一、 全局拓扑链路与模块调用流向
+
+本系统是一套专为 **Clash Verge Rev** 量身打造的高性能、自动化节点优选、全链路状态守护与秒级无感自愈中枢。整体遵循 **分层解耦、单向依赖、Controller中枢编排、双引擎热重载** 的企业级工程架构。
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                                    应用启动层 (Launchers)                                  │
+│   main.py (环境自检/引导) ──► main_fluent.py (PyQt6 Fluent Design) ──► gemini-code (兼容层) │
+└────────────────────────────────────────────┬─────────────────────────────────────────────┘
+                                             │
+                                             ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                               核心协调与编排层 (Orchestration)                             │
+│                         gui_fluent/app_controller.py (AppController)                     │
+│   ┌────────────────────────────────────────┼────────────────────────────────────────┐    │
+│   ▼                                        ▼                                        ▼    │
+│ [全局状态中枢]                      [业务管道流水线]                          [后台哨兵守护]  │
+│ core/state_manager.py              gui_fluent/pipelines/                    services/    │
+│ (StateManager 线程安全状态)        ├── auto_pipeline.py (全量大优选)       auto_heal_   │
+│ core/signal_bus.py                 └── fav_pipeline.py  (优质复测留任)       watcher.py   │
+│ (SignalBus 事件解耦总线)                                                    (秒级无感自愈)│
+└────────────────────────────────────────────┬─────────────────────────────────────────────┘
+                                             │
+                                             ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 底层领域服务层 (Domain Services)                           │
+│   services/clash_client.py         ─── Mihomo/Clash 核心 REST API (节点切换/延时/连接监控)     │
+│   services/colo_service.py         ─── Cloudflare 物理机房嗅探、历史统计、防漂移与亚洲节点判定 │
+│   services/script_generator.py     ─── Script.js 动态生成、物理端点拦截、规范更名、双引擎同步  │
+│   services/subscription_service.py ─── 订阅 YAML 解析、物理端点去重提取、节点名称规范化对齐    │
+│   services/pool_service.py         ─── 精选池、典藏池、黑名单多池聚合计算与配额分配算法       │
+│   services/filter_service.py       ─── 抖动率过滤、健康度巡检、低速黑名单过滤                 │
+│   services/probe_service.py        ─── HTTP 微探针、真实下行带宽测速引擎                     │
+└────────────────────────────────────────────┬─────────────────────────────────────────────┘
+                                             │
+                                             ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                                配置、工具与外部内核交互层 (Infra)                          │
+│   config/settings.py               ─── 路径定位、系统参数常量、深色主题、正则排除规则          │
+│   config/config_manager.py         ─── node_assistant_config.json 原子保存与互斥锁安全读取    │
+│   utils/win32_utils.py             ─── Win32 全局热键 Ctrl+Shift+F12 模拟、进程与注册表管理   │
+│   外部系统对接                      ─── Mihomo Core (9097 API) & Clash Verge Rev (Script.js)  │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 关键数据与指令流向：
+1. **启动与状态恢复**：`main_fluent.py` 实例化 `AppController` -> `AppController` 从 `config_manager` 安全加载 `node_assistant_config.json` 注入 `StateManager` -> 初始化 UI 并启动后台守护线程。
+2. **全量大优选流程**：`auto_pipeline.py` 从云端/本地拉取订阅 -> 并发调用 `subscription_service` 提取去重物理端点 -> 调用 `colo_service` 嗅探真实机房代码 (HKG, NRT 等) -> 过滤漂移节点 -> 调用 `probe_service` 进行真实文件下行带宽测速 -> 将达标节点冠名（如 `香港 HKG 22.56 MB/s`）入驻精选池与 `cloud_endpoints` 字典 -> 调用 `script_generator` 生成 `Script.js` 并执行双引擎内核热重载。
+3. **秒级无感自愈流程**：`auto_heal_watcher.py` 后台 1.0s 旁路轮询 Mihomo `/connections` 连接表 -> 发现单向发包黑洞或软失速 -> 外科手术式 `DELETE /connections/{id}` 断开坏死连接 -> 在策略组内无感秒级顺位切换至健康低延迟节点（严格隔离非香港与香港池）-> 坏死节点临时熔断冷冻 15 分钟。
+
+---
+
+## 二、 状态与并发生命周期 (State & Concurrency Lifecycle)
+
+### 1. StateManager 核心数据结构
+`core/state_manager.py` 中的 `StateManager` 是整个应用的唯一事实源 (Single Source of Truth)：
+- `favorites`: `set[str]` - 优质精选节点名称集合。
+- `stars_nodes`: `list[dict]` - 典藏常青极品池清单。
+- `all_nodes`: `list[str]` - 订阅中的物理端点去重全量节点名称列表。
+- `node_details`: `dict[str, dict]` - 节点详情映射（包含 `server`, `port`, `type`, `uuid` 等原始物理参数）。
+- `cloud_endpoints`: `dict[str, str]` - 物理端点 (`IP:Port`) -> 规范化名称（如 `"23.133.52.10:2053": "香港 HKG 22.56 MB/s"`），拥有最高霸占优先级。
+- `node_colo`: `dict[str, str]` - 端点/节点 -> 物理机房代码（如 `"HKG"`, `"NRT"`）。
+- `node_colo_history`: `dict[str, list]` - 7 天机房历史检测记录，用于长效防漂移。
+- `local_blacklist` & `speed_blacklist`: `set[str]` - 延迟超标与下行低速黑名单集合。
+
+### 2. 并发模型与锁 (Lock) 分布规则
+系统涉及多个并发执行上下文：
+- **GUI 主线程**：运行 PyQt6 响应式事件循环，负责所有界面交互与渲染。
+- **Pipeline 工作线程**：`AutoPipeline` (QThread)、`FavPipeline` (QThread)，负责长时间测速与优选计算。
+- **Sentinel 哨兵线程**：`AutoHealWatcher` (threading.Thread)，常驻后台进行毫秒级链路感知。
+- **定时调度线程**：`Scheduler` (threading.Thread)，处理定时自动优选。
+
+#### ⚠️ 死锁防范与锁粒度黄金军规：
+1. **统一锁接口**：`StateManager` 内置私有递归互斥锁 `_global_lock`，对外通过 `@property def lock(self): return self._global_lock` 暴露。所有线程必须统一通过 `with self.state.lock:` 或 `with self.controller.state.lock:` 获取锁。
+2. **锁内严禁同步阻塞 I/O**：绝对禁止在持有 `state.lock` 时调用网络请求（如 `requests.get`、下行测速、`time.sleep`）或弹出 GUI 阻塞对话框（如 `QMessageBox.exec()`）。
+3. **快照分离模式 (Snapshot Pattern)**：
+   ```python
+   # 正确范式：锁内快照，锁外耗时操作
+   with self.state.lock:
+       fav_snapshot = set(self.state.favorites)
+       details_snapshot = dict(self.state.node_details)
+   
+   # 锁外执行耗时网络测速
+   results = perform_speed_tests(fav_snapshot, details_snapshot)
+   
+   # 结果回写再短暂入锁
+   with self.state.lock:
+       self.state.favorites.update(results.qualified)
+   ```
+4. **协作式优雅终止 (Stop Event)**：严禁使用 `terminate()` 或系统级暴力杀线程。统一调用 `self.state.get_stop_event(name)` 获取 `threading.Event`，流水线循环内检测 `if stop_event.is_set(): break` 实现安全收尾与状态自愈。
+
+---
+
+## 三、 模块边界与底层契约 (Architecture Red Lines & Contracts)
+
+### 1. 目录依赖架构红线（绝对不可逾越）
+- **红线 1（严格单向分层，严禁反向污染）**：
+  `services` 和 `config` 属于纯粹的基础设施与算法层，**绝对严禁导入任何 GUI 模块**（无论是 `gui` 还是 `gui_fluent`）。基础模块必须能够在无任何 UI 的 Headless 环境下独立进行单元测试。
+- **红线 2（View-Controller 严格隔离）**：
+  所有界面层组件（`pages/`、`widgets/`、`components/`）只负责数据渲染与事件触发，**绝对严禁直接调用底层 `services` 或直接执行文件写盘**。所有业务操作必须通过委托 `self.controller.<method>()` 执行。
+- **红线 3（物理机房级绝对防御契约）**：
+  对非香港策略组（`⚡ 自动选择 (非香港)`）的过滤，**绝不允许仅依赖节点名称字符串正则**！必须将由 Python 端嗅探到的物理香港机房端点黑名单（`hkEndpoints`）注入脚本，在物理端点层实施一票否决。
+- **红线 4（规范命名唯一霸占契约）**：
+  由系统冠名并收录于 `cloud_endpoints` 的规范名称（如 `香港 HKG 22.56 MB/s`），在全局任何订阅解析（`load_nodes_from_profile`）与状态对齐（`reconcile_endpoints`）中**具备最高霸占优先级**，严禁逆向降级还原回机场原始未清洗的广告名称。
+
+### 2. 系统核心设计模式
+- **Controller 协调器模式**：`gui_fluent/app_controller.py` 作为全系统总调度中枢，统一协调状态持久化、UI 信号转发、流水线启停与内核重载。
+- **Pipeline 管道模式**：`auto_pipeline.py` 与 `fav_pipeline.py` 将复杂的测活、测速、校准、入池与热载步骤分解为标准管道阶段。
+- **Observer 观察者模式**：通过 `SignalBus` 与 PyQt6 Signals 实现后台任务进度、日志、状态向界面的解耦通知。
+- **Sentinel 哨兵自愈模式**：`auto_heal_watcher.py` 以后台旁路方式进行零流量损耗的真实连接感知与断流自愈。
+- **Dual-Engine 双引擎热更模式**：`Script.js`（动态规则注入） + `clash-verge.yaml`（原子覆盖并通知 API 热重载），彻底攻克快捷键穿透失败的边界场景。
+
+---
+
+## 四、 近期关键排雷与核心修复纪要 (Critical Bug Post-Mortems)
+
+### 1. StateManager 缺少 lock 属性导致多线程崩溃闪退
+- **事故现象**：在 Fluent 界面下启动大优选或复测时，程序瞬间崩溃闪退。
+- **底层根因**：`StateManager` 原本私有锁命名为 `_global_lock`，但在模块化重构时，Controller 和各 Pipeline 广泛采用了 `with self.state.lock:`。当多线程并发执行时，直接抛出 `AttributeError: 'StateManager' object has no attribute 'lock'`，未捕获异常导致 Python 进程直接退出。
+- **解决方案**：在 `core/state_manager.py` 中为 `StateManager` 添加 `@property def lock(self): return self._global_lock`，确保所有多线程上下文安全、平滑地获得线程锁保护。
+
+### 2. 香港节点因机场广告名伪装穿透「⚡ 自动选择 (非香港)」策略组
+- **事故现象**：全量大优选后，用户发现非香港组首位赫然排着 `Mia优选 | 09-12 19:32 | BestCF.pages.dev`，不仅没改名，而且物理机房实际为香港 HKG。
+- **底层根因**：
+  1. `Script.js` 中的 `isNonHongKongProxy` 纯粹依赖名称正则 `/(香港|HK|Hong\\s*Kong)/i`，而机场原始名字脱敏不带任何地区词，导致正则一票否决失效；
+  2. 生成 `Script.js` 时未在 `config.proxies` 内存中覆盖 `p.name`；
+  3. `reconcile_endpoints` 在对齐时把已命名的 `香港 HKG 22.56 MB/s` 反向还原为了原始订阅中的怪名字。
+- **解决方案**：
+  1. **物理端点黑名单硬核拦截**：在 `services/script_generator.py` 中聚合已知香港端点注入 `hkEndpoints`（收录 808 个端点），在 `isNonHongKongProxy` 中实施物理端点 `hkEndpoints.includes(ep)` 一票否决；
+  2. **内存规范更名注入**：在 `Script.js` 步骤 0 中引入 `canonicalNameMap`，遍历 `config.proxies` 时自动将其覆盖更名为规范名称（如 `香港 HKG 22.56 MB/s`）；
+  3. **消除反向降级**：修复 `reconcile_endpoints`，锁定 `cloud_endpoints` 规范命名优先权。
+
+### 3. YouTube Shorts 播放中途短暂断流转圈（DNS Fake-IP 与流媒体加固）
+- **事故现象**：播放 YouTube 视频时前几秒秒开，随后第 10 秒发生几秒卡顿转圈才继续复播。
+- **底层根因**：Clash Verge 的 DNS 缺少 `enhanced-mode: fake-ip`，且 `fallback-filter` 缺少 `googlevideo.com` 等流媒体 CDN 域名，导致国内公共 DNS 解析分片域名时遭受 GFW 投毒返回 Facebook 虚假 IP（HTTP 404），引发播放器卡顿重试。
+- **解决方案**：在 `services/script_generator.py` 的脚本模板与 `sync_runtime_clash_yaml_and_reload` 中固化 `enhanced-mode: fake-ip` 与完整流媒体白名单，实现 0 毫秒虚拟 IP 极速下发，彻底免疫 DNS 污染。
+
+---
+
+## 五、 全局源码全量打包索引 (Source Manifest)
+以下为当前代码库中所有非忽略源码文件的完整内容（未做任何截断），供全局审阅与深度代码级追踪：
+
+"""
+
 def pack_repo():
     output_file = 'repo_context.md'
     
     with open(output_file, 'w', encoding='utf-8') as out_f:
-        out_f.write("# Repository Context\n\n")
-        out_f.write("This file contains the complete, un-truncated source code of the repository to provide a full context.\n\n")
+        # 写入上帝视角大地图
+        out_f.write(GOD_VIEW_MAP)
+        out_f.write("\n\n")
         
         for root, dirs, files in os.walk('.'):
             dirs[:] = [d for d in dirs if not is_ignored(os.path.join(root, d))]
             
-            for file in files:
+            for file in sorted(files):
                 file_path = os.path.join(root, file)
                 if is_ignored(file_path):
                     continue
@@ -62,8 +361,14 @@ def pack_repo():
                     lang = ext[1:] if ext else 'text'
                     if lang == 'py': 
                         lang = 'python'
-                    elif lang == 'md':
+                    elif lang == 'md': 
                         lang = 'markdown'
+                    elif lang == 'js':
+                        lang = 'javascript'
+                    elif lang == 'json':
+                        lang = 'json'
+                    elif lang == 'yaml' or lang == 'yml':
+                        lang = 'yaml'
                     
                     out_f.write(f"```{lang}\n")
                     out_f.write(content)
@@ -75,9 +380,11 @@ def pack_repo():
                     out_f.write(f"> Error reading file: {str(e)}\n\n")
 
 if __name__ == '__main__':
-    print("Packing repository into repo_context.md without truncation...")
+    print("Packing repository with God-View Architecture Map into repo_context.md...")
     pack_repo()
-    print("Done! repo_context.md is now fully updated.")
+    print("Done! repo_context.md is now fully updated with God-View Architecture Map.")
+
+
 ```
 
 ## File: `gemini-code-1788793285196.py`
@@ -295,7 +602,7 @@ if __name__ == "__main__":
 
 ## File: `temp_runner.js`
 
-```js
+```javascript
 
 function main(config) {
   // ================= 策略组参数定义 =================
@@ -1312,6 +1619,22 @@ console.log('Result auto no-hk group count:', out['proxy-groups'].find(g => g.na
 console.log('Sample no-hk proxies:', out['proxy-groups'].find(g => g.name === '⚡ 自动选择 (非香港)').proxies.slice(0, 5));
 ```
 
+## File: `temp_test.js`
+
+```javascript
+
+const fs = require('fs');
+const scriptContent = fs.readFileSync('C:/Users/leime/AppData/Roaming/io.github.clash-verge-rev.clash-verge-rev/profiles/Script.js', 'utf8');
+eval(scriptContent);
+
+const p1 = { name: '辣子鸡优选 | 中国香港 HK | 43.175.131.30:443', server: '43.175.131.30', port: 443 };
+const p2 = { name: '香港 HKG 24.62 MB/s', server: '43.175.131.30', port: 443 };
+const cfg = { proxies: [p1, p2], 'proxy-groups': [], rules: [] };
+const res = main(cfg);
+const g = res['proxy-groups'].find(x => x.name === '⚡ 自动选择');
+console.log(JSON.stringify(g.proxies));
+```
+
 ## File: `代码审查报告.md`
 
 ```markdown
@@ -1331,13 +1654,84 @@ console.log('Sample no-hk proxies:', out['proxy-groups'].find(g => g.name === '�
 - 多池流转引发的“数据幽灵”与漏网之鱼：我们系统的核心竞争力包含多池流转机制（活跃、精选、黑名单 page_delay_black.py / page_speed_black.py、典藏 page_stars.py 等）。在节点从 A 池弹出并准备压入 B 池的极短内存操作间隙内，如果发生异常中断（例如内存操作抛错），该节点就会陷入“不在 A 也不在 B”的数据彻底蒸发状态，或者“既存在于黑名单又存在于活跃池”的错乱状态。多池与状态转换之间必须确保内存操作逻辑的原子事务性，要么全部流转成功，要么触发异常全部回滚。
 ```
 
+## File: `config/__init__.py`
+
+```python
+"""
+Clash Verge 节点管理助手 - 配置管理包
+"""
+```
+
 ## File: `config/config_manager.py`
 
 ```python
-import os
 import json
-import threading
+import os
 import shutil
+import threading
+
+
+def atomic_save_config(filepath, config_dict):
+    """
+    原子化持久保存配置字典：
+    1. 先写入临时文件 .tmp 并刷新磁盘
+    2. 校验文件写入完整无损
+    3. 保留原文件为 .bak 作为灾备
+    4. 执行原子重命名覆盖，杜绝断电/中断导致文件损坏清零
+    """
+    try:
+        dir_name = os.path.dirname(filepath)
+        if dir_name and not os.path.exists(dir_name):
+            os.makedirs(dir_name, exist_ok=True)
+
+        tmp_path = filepath + ".tmp"
+        bak_path = filepath + ".bak"
+
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(config_dict, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+
+        if os.path.exists(filepath):
+            try:
+                shutil.copyfile(filepath, bak_path)
+            except Exception:
+                pass
+
+        os.replace(tmp_path, filepath)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def safe_load_config(filepath):
+    """
+    安全读取配置文件，若主配置损坏则自动从 .bak 灾备副本中无缝自愈恢复
+    """
+    if not os.path.exists(filepath):
+        bak_path = filepath + ".bak"
+        if os.path.exists(bak_path):
+            filepath = bak_path
+        else:
+            return {}
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        bak_path = filepath + ".bak"
+        if os.path.exists(bak_path):
+            try:
+                with open(bak_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+            except Exception:
+                pass
+    return {}
+
 
 class ConfigManager:
     _instance = None
@@ -1358,34 +1752,13 @@ class ConfigManager:
 
     def load_config(self):
         with self.file_lock:
-            try:
-                if os.path.exists(self.config_path):
-                    with open(self.config_path, "r", encoding="utf-8") as f:
-                        self.config_data = json.load(f)
-                else:
-                    self.config_data = {}
-            except Exception as e:
-                print(f"读取配置文件异常，已使用空配置兜底: {e}")
-                self.config_data = {}
+            self.config_data = safe_load_config(self.config_path)
 
     def save_config(self, new_data=None):
         if new_data is not None:
             self.config_data.update(new_data)
-        
         with self.file_lock:
-            temp_path = self.config_path + ".tmp"
-            try:
-                with open(temp_path, "w", encoding="utf-8") as f:
-                    json.dump(self.config_data, f, indent=4, ensure_ascii=False)
-                # 原子替换，防止写入一半断电导致配置丢失为 0KB
-                os.replace(temp_path, self.config_path)
-            except Exception as e:
-                print(f"配置文件安全写入失败，已拦截异常: {e}")
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except OSError:
-                        pass
+            atomic_save_config(self.config_path, self.config_data)
 
     def get(self, key, default=None):
         with self.file_lock:
@@ -1395,17 +1768,6 @@ class ConfigManager:
         with self.file_lock:
             self.config_data[key] = value
             self.save_config()
-
-def safe_load_config(path):
-    """安全加载 JSON 配置文件，异常时返回空字典兜底"""
-    import os, json
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
 ```
 
 ## File: `config/settings.py`
@@ -1490,19 +1852,21 @@ NON_ASIA_CN_KEYWORDS = [
     "新西兰", "奥克兰", "惠灵顿",
     # 非洲与其他
     "南非", "约翰内斯堡", "开普敦", "埃及", "尼日利亚", "肯尼亚",
-    "多哥", "汤加", "斐济", "巴拿马",
+    "多哥共和国", "非洲多哥", "汤加王国", "大洋洲汤加", "斐济", "巴拿马",
 ]
 
 # 严格非亚洲国家与机场三字码 (独立大写单词匹配)
+# 注意：已彻底剔除容易与英文介词、代词、TG缩写发生灾难性碰撞的2字母代码 (如 TG=Telegram, TO=to, IS=is, AT=at, IT=IT科技/it, NO=No.)，
+# 统一采用国际标准化组织 ISO 3字母代码 (TGO, TON, ISL, AUT, ITA, NOR)，消除全部语义误杀！
 NON_ASIA_CODE_SET = {
     "US", "USA", "CA", "CAN", "MX", "MEX", "BR", "BRA", "AR", "ARG", "CL", "CHL",
     "DE", "DEU", "GB", "GBR", "UK", "FR", "FRA", "NL", "NLD", "RU", "RUS",
-    "CH", "CHE", "SE", "SWE", "NO", "NOR", "FI", "FIN", "DK", "DNK",
-    "IT", "ITA", "ES", "ESP", "IE", "IRL", "PL", "POL", "AT", "AUT",
+    "CH", "CHE", "SE", "SWE", "NOR", "FI", "FIN", "DK", "DNK",
+    "ITA", "ES", "ESP", "IE", "IRL", "PL", "POL", "AUT",
     "BE", "BEL", "CZ", "CZE", "RO", "ROU", "UA", "UKR", "GR", "GRC",
-    "PT", "PRT", "HU", "HUN", "BG", "BGR", "IS", "ISL", "LU", "LUX",
-    "AU", "AUS", "NZ", "NZL", "ZA", "ZAF", "TG", "TO", "FJ", "PA",
-    "LAX", "SJC", "SFO", "SEA", "ORD", "DFW", "JFK", "EWR", "IAD", "ATL", "MIA", "PHX", "PDX", "LAS",
+    "PT", "PRT", "HU", "HUN", "BG", "BGR", "ISL", "LU", "LUX",
+    "AU", "AUS", "NZ", "NZL", "ZA", "ZAF", "TGO", "TON", "FJ", "PA",
+    "LAX", "SJC", "SFO", "SEA", "ORD", "DFW", "JFK", "EWR", "IAD", "ATL", "PHX", "PDX", "LAS",
     "YYZ", "YVR", "YUL", "LHR", "MAN", "CDG", "AMS", "FRA", "MUC", "BER", "ZRH", "GVA",
     "ARN", "OSL", "HEL", "CPH", "MXP", "FCO", "MAD", "BCN", "DUB", "WAW", "VIE", "BRU",
     "SVO", "DME", "LED", "SYD", "MEL", "BNE", "PER", "AKL", "GRU", "EZE", "JNB", "CPT",
@@ -1658,11 +2022,11 @@ COUNTRY_NAME_MAP = {
 }
 ```
 
-## File: `config/__init__.py`
+## File: `core/__init__.py`
 
 ```python
 """
-Clash Verge 节点管理助手 - 配置管理包
+Clash Verge 节点管理助手 - 核心状态与模型包
 """
 ```
 
@@ -1702,6 +2066,7 @@ global_signals = SignalBus()
 ```python
 import threading
 
+
 class StateManager:
     _instance = None
     _init_lock = threading.Lock()
@@ -1714,9 +2079,31 @@ class StateManager:
             return cls._instance
 
     def _init_state(self):
-        # 采用 RLock 允许重入，避免同一线程内多次请求产生的死锁死局
+        # 采用 RLock 允许重入，避免同一线程内多次请求产生的死锁
         self._global_lock = threading.RLock()
         self._thread_stop_events = {}
+
+        # 核心业务状态容器（预置默认容器初值，彻底杜绝 AttributeError）
+        self.all_nodes = []
+        self.node_details = {}
+        self.active_profile = ""
+        self.favorites = set()
+        self.local_blacklist = set()
+        self.speed_blacklist = set()
+        self.blacklist_reasons = {}
+        self.fav_reasons = {}
+        self.verified_nodes = {}
+        self.stars_nodes = []
+        self.auto_endpoints = {}
+        self.cloud_endpoints = {}
+        self.node_delays = {}
+        self.node_speeds = {}
+        self.node_colo = {}
+        self.node_history = {}
+        self.node_speed_history = {}
+        self.node_delay_history = {}
+        self.node_colo_history = {}
+        self.blacklist_timestamps = {}
 
     @property
     def lock(self):
@@ -1751,13 +2138,39 @@ class StateManager:
                 self._global_lock.release()
             except RuntimeError:
                 pass
+
+    def get_snapshot(self):
+        """
+        线程安全导出状态机全局快照
+        """
+        with self._global_lock:
+            return {
+                "favorites": list(self.favorites),
+                "local_blacklist": list(self.local_blacklist),
+                "speed_blacklist": list(self.speed_blacklist),
+                "blacklist_reasons": dict(self.blacklist_reasons),
+                "fav_reasons": dict(self.fav_reasons),
+                "verified_nodes": dict(self.verified_nodes),
+                "stars_nodes": list(self.stars_nodes),
+                "node_delays": dict(self.node_delays),
+                "node_speeds": dict(self.node_speeds),
+                "node_colo": dict(self.node_colo),
+                "node_history": dict(self.node_history),
+                "node_speed_history": dict(self.node_speed_history),
+                "node_delay_history": dict(self.node_delay_history),
+                "node_colo_history": dict(self.node_colo_history),
+                "blacklist_timestamps": dict(self.blacklist_timestamps),
+                "cloud_endpoints": dict(self.cloud_endpoints),
+                "all_nodes": list(self.all_nodes),
+                "active_profile": str(self.active_profile),
+            }
 ```
 
-## File: `core/__init__.py`
+## File: `gui_fluent/__init__.py`
 
 ```python
 """
-Clash Verge 节点管理助手 - 核心状态与模型包
+Clash Verge 节点管理助手 - Fluent UI 组件库
 """
 ```
 
@@ -1790,15 +2203,26 @@ from concurrent.futures import ThreadPoolExecutor
 from core.state_manager import StateManager
 import config.config_manager
 from pipelines.scheduler import SchedulerDaemon
+from services.auto_heal_watcher import AutoHealWatcher
 from services.clash_client import ClashClient
-from services.subscription_service import SubscriptionService
+from services.subscription_service import (
+    SubscriptionService,
+    extract_nodes_and_details_from_file,
+    choose_canonical_node_name,
+    get_node_endpoint,
+    resolve_node_to_current,
+    update_remote_subscription,
+)
 from services.colo_service import is_asian_node, analyze_colo_stats
 from services.filter_service import compute_delay_stats
-import services.pool_service
-# 老板，我已经收到了您最新的闪退日志[cite: 4]，明确知道这次闪退发生在 app_controller.py 的第 31 行，是因为试图导入不存在的 get_pool_endpoint_sets。
-# 但是，您刚刚绑定的 GitHub 全量知识库依然是 ZIP 压缩解析后的二进制乱码形态[cite: 5]，我完全无法读取 services/pool_service.py 内部的明文代码。
-# 为了绝对遵守“绝不凭直觉瞎猜”的铁律、死守您的 API 额度，我只能先将其替换为最基础的模块导入，防止反重力智能体触发全盘搜索。
-# 请您直接把 services/pool_service.py 的明文源码发给我，或者告诉我里面真实存在的类名/函数名，我会立刻为您提供最精准的无缝替换代码！
+from services.pool_service import (
+    get_pool_endpoint_sets,
+    deduplicate_favorites_by_endpoint,
+    align_favorites_with_current_subscription,
+    clean_offline_favorites,
+    process_verified_lifecycle,
+    purge_invalid_and_blacklisted_from_all_pools,
+)
 from services.script_generator import build_script_js, write_script_js
 from utils.win32_utils import trigger_verge_reactivate_hotkey
 
@@ -1820,6 +2244,9 @@ class AppController(QObject):
 
     scheduler_trigger_full_signal = pyqtSignal(str)
     scheduler_trigger_fav_signal = pyqtSignal(str)
+
+    auto_heal_status_updated = pyqtSignal(dict)
+    auto_heal_event_triggered = pyqtSignal(str, str, dict)
 
     @property
     def pending_pool_lock(self):
@@ -1845,6 +2272,78 @@ class AppController(QObject):
             on_trigger_fav=self._on_scheduler_trigger_fav,
         )
         self._scheduler.start()
+
+        # 启动后台秒级链路感知与无感自愈守护服务
+        self.auto_heal_watcher = AutoHealWatcher(
+            client=self.clash_client,
+            get_candidates_fn=self._get_auto_heal_candidates,
+            on_heal_event=self._on_auto_heal_event,
+            on_status_update=self._on_auto_heal_status_update,
+            log_fn=self.log,
+        )
+        self.auto_heal_watcher.start()
+
+    def _on_auto_heal_event(self, dead_node: str, backup_node: str, info: dict):
+        self.auto_heal_event_triggered.emit(dead_node, backup_node, info)
+
+    def _on_auto_heal_status_update(self, status: dict):
+        self.auto_heal_status_updated.emit(status)
+
+    def _get_auto_heal_candidates(self, is_non_hk: bool = False) -> list:
+        """
+        按实测下载速度与延迟综合排序精选池中的健康候选节点，
+        若 is_non_hk 为 True，严格排除所有香港与大陆节点，确保 Gemini/反重力 100% 纯净分流。
+        """
+        from config.settings import EXCLUDE_HK_REGEX
+
+        with self.state.lock:
+            favs = list(self.state.favorites)
+            speeds = dict(self.state.node_speeds)
+            delays = dict(self.state.node_delays)
+
+        if not favs:
+            try:
+                proxies_map = self.clash_client.get_proxies()
+                grp_key = "⚡ 自动选择 (非香港)" if is_non_hk else "⚡ 自动选择"
+                favs = list(proxies_map.get(grp_key, {}).get("all", []))
+            except Exception:
+                favs = []
+
+        if is_non_hk:
+            favs = [n for n in favs if n and not EXCLUDE_HK_REGEX.search(n)]
+
+        def sort_key(name):
+            sp = speeds.get(name, 0.0)
+            if sp <= 0.0:
+                m = re.search(r"([\d.]+)\s*MB/s", name)
+                if m:
+                    try:
+                        sp = float(m.group(1))
+                    except Exception:
+                        pass
+            dl = delays.get(name, 9999)
+            return (-sp, dl)
+
+        favs.sort(key=sort_key)
+        return favs
+
+    def toggle_auto_heal(self, enabled: bool):
+        if hasattr(self, "auto_heal_watcher"):
+            self.auto_heal_watcher.update_config(enabled=enabled)
+            status_text = "开启" if enabled else "关闭"
+            self.log(f"🛡️ [自愈引擎] 已手动{status_text}断流秒级自愈守护")
+
+    def diagnose_current_link(self) -> dict:
+        if hasattr(self, "auto_heal_watcher"):
+            res = self.auto_heal_watcher.diagnose_current_link()
+            self.log(
+                f"🩺 [双通道诊断] 全量出口: 【{res.get('active_node')}】(延迟: {res.get('delay_ms')}ms) | "
+                f"非港出口(Gemini/AI): 【{res.get('active_nohk_node')}】(延迟: {res.get('delay_nohk_ms')}ms) | "
+                f"活跃连接: {res.get('total_connections')}条"
+            )
+            return res
+        return {}
+
 
     def set_scheduler_config_provider(self, provider_fn):
         """
@@ -1906,6 +2405,34 @@ class AppController(QObject):
             self.state.blacklist_timestamps = dict(data.get("blacklist_timestamps", {}))
             self.state.cloud_endpoints = dict(data.get("cloud_endpoints", {}))
         self.clean_favorites_ghost_tokens()
+        self.heal_falsely_blacklisted_nodes()
+
+    def heal_falsely_blacklisted_nodes(self):
+        """
+        历史误判节点智能自愈程序：
+        若节点拉黑原因为“非亚洲节点 (自动过滤)”，但在新净化规则或其实测物理Colo下确认为亚洲节点，
+        自动将其从 local_blacklist 和 blacklist_reasons 中移出释放，拯救误杀节点重回待测池！
+        """
+        with self.state.lock:
+            healed = []
+            for bl_node in list(self.state.local_blacklist):
+                reason = self.state.blacklist_reasons.get(bl_node, "")
+                if "非亚洲" in reason:
+                    ep = self._get_ep(bl_node)
+                    c = self.state.node_colo.get(bl_node, self.state.node_colo.get(ep, "-"))
+                    if is_asian_node(bl_node, colo=c):
+                        self.state.local_blacklist.discard(bl_node)
+                        self.state.blacklist_reasons.pop(bl_node, None)
+                        if ep:
+                            self.state.local_blacklist.discard(ep)
+                            self.state.blacklist_reasons.pop(ep, None)
+                        healed.append(bl_node)
+            if healed:
+                self.log(f"🌿 [智能自愈] 已成功将 {len(healed)} 个误判为非亚洲的历史节点从黑名单中释放恢复！")
+                self.save_config({
+                    "local_blacklist": list(self.state.local_blacklist),
+                    "blacklist_reasons": self.state.blacklist_reasons,
+                })
 
 
     def log(self, msg: str):
@@ -1946,7 +2473,9 @@ class AppController(QObject):
         """
         with self.state.lock:
             ep_to_names = {}
-            for item in list(self.state.all_nodes) + [s.get("matched_name", "") for s in self.state.stars_nodes]:
+            all_nodes_list = getattr(self.state, "all_nodes", []) or []
+            stars_nodes_list = getattr(self.state, "stars_nodes", []) or []
+            for item in list(all_nodes_list) + [s.get("matched_name", "") for s in stars_nodes_list if isinstance(s, dict)]:
                 if not item:
                     continue
                 ep = self._get_ep(item)
@@ -2068,8 +2597,14 @@ class AppController(QObject):
             orig_name = info["original_name"]
             node_d = dict(info["detail"])
 
-            # 若订阅 YAML 中原生名称存在且非纯 IP，优先对齐 YAML 中的实体代理名称
-            if orig_name and orig_name not in used_names:
+            # 云端专属保活规范名具备最高霸占优先级，彻底去牛皮癣并统一全局命名规范
+            if info.get("has_cloud") and base_name:
+                target_name = base_name
+                suffix_idx = 1
+                while target_name in used_names:
+                    suffix_idx += 1
+                    target_name = f"{base_name} {suffix_idx}"
+            elif orig_name and orig_name not in used_names:
                 target_name = orig_name
             else:
                 target_name = base_name
@@ -2351,18 +2886,29 @@ class AppController(QObject):
             # 1. 对齐精选池 (支持云端绝对免死白名单与历史废弃马甲安全清洗)
             cloud_eps = getattr(self.state, "cloud_endpoints", {})
             for old_name in list(self.state.favorites):
-                if old_name not in self.state.all_nodes:
-                    old_ep = get_node_endpoint(old_name, self.state.node_details)
-                    # 补充保护：若无法从 node_details 解析端点，尝试通过云端双向映射（Key与Value）反查物理端点
-                    if not old_ep and cloud_eps:
-                        if old_name in cloud_eps:
-                            old_ep = old_name
-                        else:
-                            for c_ep, c_rem in cloud_eps.items():
-                                if c_rem and (c_rem == old_name or str(old_name).startswith(c_rem)):
-                                    old_ep = c_ep
-                                    break
+                old_ep = get_node_endpoint(old_name, self.state.node_details)
+                # 补充保护：若无法从 node_details 解析端点，尝试通过云端双向映射（Key与Value）反查物理端点
+                if not old_ep and cloud_eps:
+                    if old_name in cloud_eps:
+                        old_ep = old_name
+                    else:
+                        for c_ep, c_rem in cloud_eps.items():
+                            if c_rem and (c_rem == old_name or str(old_name).startswith(c_rem)):
+                                old_ep = c_ep
+                                break
 
+                # 优先检查云端/优选规范命名，确保规范名称最高优先级，绝不降级回生硬机场名
+                canonical_cand = None
+                if old_ep and cloud_eps:
+                    canonical_cand = cloud_eps.get(old_ep)
+                    if not canonical_cand and ":" in old_ep:
+                        canonical_cand = cloud_eps.get(old_ep.split(":", 1)[0])
+
+                if canonical_cand:
+                    if canonical_cand != old_name:
+                        self._migrate_node_name(old_name, canonical_cand, old_ep)
+                        migrated_count += 1
+                elif old_name not in self.state.all_nodes:
                     if old_ep:
                         new_name = current_endpoints.get(old_ep)
                         if not new_name and ":" in old_ep:
@@ -2519,7 +3065,8 @@ class AppController(QObject):
                 untested_groups = {}
                 for name in self.state.all_nodes:
                     ep_val = self._get_ep(name)
-                    is_asian = is_asian_node(name)
+                    c_val = self.state.node_colo.get(ep_val, self.state.node_colo.get(name, "-"))
+                    is_asian = is_asian_node(name, colo=c_val)
                     if not is_asian:
                         is_d_black = True
                         is_s_black = False
@@ -2769,7 +3316,8 @@ class AppController(QObject):
                 # 订阅内的延迟黑名单
                 for name in self.state.all_nodes:
                     ep_val = self._get_ep(name)
-                    is_asian = is_asian_node(name)
+                    c_val = self.state.node_colo.get(ep_val, self.state.node_colo.get(name, "-"))
+                    is_asian = is_asian_node(name, colo=c_val)
                     is_d_black = (not is_asian) or (name in self.state.local_blacklist) or (ep_val and ep_val in self.state.local_blacklist)
                     if is_d_black:
                         ep_key = ep_val if ep_val else name
@@ -2858,7 +3406,9 @@ class AppController(QObject):
                 # 订阅内的低速黑名单
                 for name in self.state.all_nodes:
                     ep_val = self._get_ep(name)
-                    is_d_black = (not is_asian_node(name)) or (name in self.state.local_blacklist) or (ep_val and ep_val in self.state.local_blacklist)
+                    c_val = self.state.node_colo.get(ep_val, self.state.node_colo.get(name, "-"))
+                    is_asian = is_asian_node(name, colo=c_val)
+                    is_d_black = (not is_asian) or (name in self.state.local_blacklist) or (ep_val and ep_val in self.state.local_blacklist)
                     is_s_black = not is_d_black and ((name in self.state.speed_blacklist) or (ep_val and ep_val in self.state.speed_blacklist))
                     if is_s_black:
                         ep_key = ep_val if ep_val else name
@@ -3544,6 +4094,8 @@ class AppController(QObject):
             is_asian_node_fn=is_asian_node,
             get_node_endpoint_fn=self._get_ep,
             fission_proxies=fission_proxies,
+            cloud_endpoints=getattr(self.state, "cloud_endpoints", None),
+            node_colo=getattr(self.state, "node_colo", None),
         )
         ok, res = write_script_js(script_code)
         if ok:
@@ -3560,6 +4112,14 @@ class AppController(QObject):
             self.log(f"⚡ 热键通知成功: {hk_msg}")
         else:
             self.log(f"⚠️ 热键触发反馈: {hk_msg}")
+
+        # 双引擎保障：直接同步 runtime clash-verge.yaml 并热载内核
+        try:
+            from services.script_generator import sync_runtime_clash_yaml_and_reload
+            sync_runtime_clash_yaml_and_reload(fission_proxies=fission_proxies)
+        except Exception:
+            pass
+
         return hk_ok
 
     # ==================== TopBar 顶部工具栏业务 ====================
@@ -4331,6 +4891,8 @@ class AppController(QObject):
                         self.state.cloud_endpoints[ep_val] = uniform_name
                         if ":" in ep_val:
                             self.state.cloud_endpoints[ep_val.split(":")[0]] = uniform_name
+                        if f != uniform_name:
+                            self._migrate_node_name(f, uniform_name, ep_val)
 
                 payload = ("\r\n".join(fav_lines) + "\r\n") if fav_lines else "# empty\r\n"
                 ok, msg = self.push_text_to_cf_worker(payload, subpath="/auto.txt")
@@ -4422,7 +4984,8 @@ class AppController(QObject):
                         if ep not in fav_eps:
                             continue
 
-                        if not (is_asian_node(ep) or (rem and is_asian_node(rem))):
+                        c_val = self.state.node_colo.get(ep, "-")
+                        if not (is_asian_node(ep, colo=c_val) or (rem and is_asian_node(rem, colo=c_val))):
                             self.state.local_blacklist.add(ep)
                             continue
 
@@ -4819,21 +5382,30 @@ import sys
 
 if "PyQt5" in sys.modules:
     from PyQt5.QtCore import Qt
+    from PyQt5.QtGui import QIcon
     from PyQt5.QtWidgets import (
         QApplication,
         QWidget,
         QVBoxLayout,
         QHBoxLayout,
         QStackedWidget,
+        QSystemTrayIcon,
+        QMenu,
+        QAction,
+        QStyle,
     )
 else:
     from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QIcon, QAction
     from PyQt6.QtWidgets import (
         QApplication,
         QWidget,
         QVBoxLayout,
         QHBoxLayout,
         QStackedWidget,
+        QSystemTrayIcon,
+        QMenu,
+        QStyle,
     )
 
 from qfluentwidgets import (
@@ -4913,6 +5485,10 @@ class MainWindow(QWidget):
         # 9. 恢复初始配置与历史回显
         cfg = self.controller.load_config() or {}
         self.restore_ui_config(cfg)
+
+        # 10. 初始化 Windows 系统托盘与自愈守护信号
+        self._init_system_tray()
+        self._bind_auto_heal_signals()
 
     def init_layout_structure(self):
         """
@@ -5075,6 +5651,13 @@ class MainWindow(QWidget):
         pc.btn_save_group.clicked.connect(self._on_save_group_clicked)
         pc.btn_test_worker.clicked.connect(self._on_test_worker_clicked)
         pc.btn_sync_auto.clicked.connect(self._on_sync_auto_clicked)
+
+        # 第 6 行：自愈守护与诊断控件绑定
+        pc.chk_auto_heal.stateChanged.connect(self._on_auto_heal_toggled)
+        pc.btn_diagnose_link.clicked.connect(self._on_diagnose_link_clicked)
+        pc.auto_heal_threshold.textChanged.connect(self._update_auto_heal_params)
+        pc.auto_heal_cooldown.textChanged.connect(self._update_auto_heal_params)
+        pc.chk_minimize_to_tray.stateChanged.connect(self._on_tray_pref_changed)
 
         # 绑定流水线结束与状态信号
         self.controller.pipeline_finished.connect(self._on_pipeline_finished)
@@ -5474,6 +6057,155 @@ class MainWindow(QWidget):
         self.controller.log(f"⚡ 收到优质池自愈降级请求: {reason}，自动启动全量大优选...")
         self._on_run_pipeline_clicked()
 
+    # ==================== Windows 系统托盘与断流秒级自愈 ====================
+
+    def _init_system_tray(self):
+        """
+        初始化 Windows 系统托盘与右键菜单
+        """
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+
+        icon = self.windowIcon()
+        if not icon or icon.isNull():
+            icon = QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DriveNetIcon)
+
+        self.tray_icon = QSystemTrayIcon(icon, self)
+        self.tray_icon.setToolTip("Clash Verge 节点管理助手 (断流秒级自愈守护中)")
+
+        tray_menu = QMenu()
+        act_show = tray_menu.addAction("显示主界面")
+        act_show.triggered.connect(self._show_window)
+
+        act_diag = tray_menu.addAction("⚡ 诊断当前链路")
+        act_diag.triggered.connect(self._on_diagnose_link_clicked)
+
+        self.act_tray_heal_toggle = tray_menu.addAction("🛡️ 断流秒级自愈")
+        self.act_tray_heal_toggle.setCheckable(True)
+        self.act_tray_heal_toggle.setChecked(self.pipeline_card.chk_auto_heal.isChecked())
+        self.act_tray_heal_toggle.triggered.connect(lambda chk: self.pipeline_card.chk_auto_heal.setChecked(chk))
+
+        tray_menu.addSeparator()
+        act_quit = tray_menu.addAction("退出应用")
+        act_quit.triggered.connect(self._force_quit)
+
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        self.tray_icon.show()
+        self._tray_balloon_shown = False
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            if self.isVisible() and not self.isMinimized():
+                self.hide()
+            else:
+                self._show_window()
+
+    def _show_window(self):
+        self.showNormal()
+        self.activateWindow()
+
+    def _force_quit(self):
+        if hasattr(self, 'controller') and self.controller:
+            self.controller.save_config(self.controller.state.get_snapshot())
+            self.controller.log("💾 正在退出并保存所有状态...")
+        QApplication.quit()
+
+    def _bind_auto_heal_signals(self):
+        self.controller.auto_heal_status_updated.connect(self._on_auto_heal_status_updated)
+        self.controller.auto_heal_event_triggered.connect(self._on_auto_heal_event_triggered)
+
+    def _on_auto_heal_status_updated(self, status: dict):
+        if not status:
+            return
+        healed_count = status.get("healed_count", 0)
+        enabled = status.get("enabled", True)
+        act_node = status.get("active_node", "")
+        nohk_node = status.get("active_nohk_node", "")
+
+        def _fmt(n):
+            if not n:
+                return "无"
+            return n if len(n) <= 14 else n[:12] + ".."
+
+        pc = self.pipeline_card
+        yc_count = status.get("yellow_cards_count", 0)
+        yc_str = f" | 🟨预警: {yc_count}" if yc_count > 0 else ""
+        if not enabled:
+            pc.lbl_auto_heal_status.setText(f"⏸ 自愈已暂停")
+            pc.lbl_auto_heal_status.setStyleSheet("color: #94a3b8; font-weight: bold;")
+        else:
+            pc.lbl_auto_heal_status.setText(f"🟢 链路守卫中 (全量: {_fmt(act_node)} | 非港: {_fmt(nohk_node)} | 自愈: {healed_count}次{yc_str})")
+            pc.lbl_auto_heal_status.setStyleSheet("color: #34d399; font-weight: bold;")
+
+        if hasattr(self, "tray_icon") and self.tray_icon:
+            yc_tip = f"\n黄牌预警: {yc_count}个" if yc_count > 0 else ""
+            self.tray_icon.setToolTip(f"Clash Verge 节点助手\n全量: {act_node}\n非港AI: {nohk_node}\n今日自愈: {healed_count}次{yc_tip}")
+
+    def _on_auto_heal_event_triggered(self, dead_node: str, backup_node: str, info: dict):
+        grp = info.get("group", "⚡ 自动选择")
+        is_non_hk = info.get("is_non_hk", False)
+        cost_ms = info.get("cost_ms", 0)
+        evicted = info.get("evicted", 0)
+        tag = "非港AI" if is_non_hk else "全量出口"
+        title = f"🛡️ 【{tag}】秒级断流自愈"
+        tip = "\n✨ 严格继承非港限制，Gemini/反重力不受影响" if is_non_hk else ""
+        msg = f"策略组 【{grp}】 坏死断流！\n已在 {cost_ms}ms 内斩断 {evicted} 条僵尸连接，并顺移至 【{backup_node}】{tip}"
+        if hasattr(self, "tray_icon") and self.tray_icon:
+            self.tray_icon.showMessage(title, msg, QSystemTrayIcon.MessageIcon.Information, 4500)
+
+    def _on_auto_heal_toggled(self, state: int):
+        enabled = bool(state == 2 or (hasattr(Qt, "CheckState") and state == Qt.CheckState.Checked.value) or bool(state))
+        self.controller.toggle_auto_heal(enabled)
+        if hasattr(self, "act_tray_heal_toggle"):
+            self.act_tray_heal_toggle.setChecked(enabled)
+        self.controller.save_config({"auto_heal_enabled": enabled})
+
+    def _on_diagnose_link_clicked(self):
+        res = self.controller.diagnose_current_link()
+        node = res.get("active_node", "未知")
+        nohk_node = res.get("active_nohk_node", "未知")
+        delay = res.get("delay_ms", "超时")
+        nohk_delay = res.get("delay_nohk_ms", "超时")
+        healthy = res.get("is_healthy", False)
+        conns = res.get("total_connections", 0)
+        status_str = "双通道全部正常畅通" if healthy else "检测到部分通道异常"
+        MessageBox(
+            "双通道链路深度诊断结果",
+            f"⚡ 全量出口 (常规/视频): {node}\n"
+            f"   延迟测定: {delay} ms\n\n"
+            f"⚡ 非港出口 (Gemini/反重力/AI): {nohk_node}\n"
+            f"   延迟测定: {nohk_delay} ms\n\n"
+            f"综合状态: {status_str}\n"
+            f"活跃连接: {conns} 条\n"
+            f"今日自愈: {res.get('healed_count', 0)} 次",
+            self
+        ).exec()
+
+    def _update_auto_heal_params(self):
+        pc = self.pipeline_card
+        try:
+            th = float(pc.auto_heal_threshold.text().strip())
+        except ValueError:
+            th = 3.5
+        try:
+            cd = float(pc.auto_heal_cooldown.text().strip()) * 60.0
+        except ValueError:
+            cd = 900.0
+        if hasattr(self.controller, "auto_heal_watcher"):
+            self.controller.auto_heal_watcher.update_config(
+                blackhole_timeout=th,
+                cooldown_duration=cd
+            )
+        self.controller.save_config({
+            "auto_heal_threshold": th,
+            "auto_heal_cooldown": cd / 60.0
+        })
+
+    def _on_tray_pref_changed(self, state: int):
+        enabled = bool(state == 2 or (hasattr(Qt, "CheckState") and state == Qt.CheckState.Checked.value) or bool(state))
+        self.controller.save_config({"minimize_to_tray_enabled": enabled})
+
     # ==================== 初始配置与历史回显 ====================
 
     def restore_ui_config(self, cfg: dict):
@@ -5587,20 +6319,58 @@ class MainWindow(QWidget):
 
         self._on_reconnect_clicked()
 
+        # 5. 恢复自愈与托盘设置
+        if "auto_heal_enabled" in cfg:
+            pc.chk_auto_heal.setChecked(bool(cfg["auto_heal_enabled"]))
+            self.controller.toggle_auto_heal(bool(cfg["auto_heal_enabled"]))
+        if "auto_heal_threshold" in cfg:
+            pc.auto_heal_threshold.setText(str(cfg["auto_heal_threshold"]))
+        if "auto_heal_cooldown" in cfg:
+            pc.auto_heal_cooldown.setText(str(cfg["auto_heal_cooldown"]))
+        if "minimize_to_tray_enabled" in cfg:
+            pc.chk_minimize_to_tray.setChecked(bool(cfg["minimize_to_tray_enabled"]))
+        self._update_auto_heal_params()
+
     def closeEvent(self, event):
-        # 窗口关闭前强制存盘
+        pc = self.pipeline_card
+        if (
+            hasattr(pc, "chk_minimize_to_tray")
+            and pc.chk_minimize_to_tray.isChecked()
+            and hasattr(self, "tray_icon")
+            and self.tray_icon.isVisible()
+        ):
+            event.ignore()
+            self.hide()
+            if not getattr(self, "_tray_balloon_shown", False):
+                self.tray_icon.showMessage(
+                    "Clash Verge 节点管理助手",
+                    "助手已最小化至系统托盘，后台保持秒级自愈与定时优选守护中...",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    3000
+                )
+                self._tray_balloon_shown = True
+            return
+
+        # 真正退出前强制存盘
         if hasattr(self, 'controller') and self.controller:
             self.controller.save_config(self.controller.state.get_snapshot())
             self.controller.log("💾 退出前已自动保存所有数据至 config...")
         super().closeEvent(event)
 ```
 
-## File: `gui_fluent/__init__.py`
+## File: `gui_fluent/components/__init__.py`
 
 ```python
 """
-Clash Verge 节点管理助手 - Fluent UI 组件库
+Fluent UI 通用界面组件模块
 """
+from gui_fluent.components.top_bar import TopBar
+from gui_fluent.components.log_panel import LogPanel
+from gui_fluent.components.bottom_action_bar import BottomActionBar
+from gui_fluent.components.pipeline_card import PipelineCard
+
+__all__ = ["TopBar", "LogPanel", "BottomActionBar", "PipelineCard"]
+
 ```
 
 ## File: `gui_fluent/components/bottom_action_bar.py`
@@ -6123,6 +6893,54 @@ class PipelineCard(QWidget):
 
         layout.addLayout(row5)
 
+        # ──────── 第 6 行：链路秒级自愈与托盘常驻 ────────
+        row6 = QHBoxLayout()
+        row6.setContentsMargins(0, 0, 0, 0)
+        row6.setSpacing(8)
+
+        lbl_heal = BodyLabel("🛡️ 链路秒级自愈:", self)
+        lbl_heal.setStyleSheet("color: #34d399; font-weight: bold;")
+        row6.addWidget(lbl_heal)
+
+        self.chk_auto_heal = CheckBox("启用断流秒级无感自愈", self)
+        self.chk_auto_heal.setObjectName("chk_auto_heal")
+        self.chk_auto_heal.setChecked(True)
+        row6.addWidget(self.chk_auto_heal)
+
+        row6.addWidget(CaptionLabel("黑洞阈值(s):", self))
+        self.auto_heal_threshold = LineEdit(self)
+        self.auto_heal_threshold.setObjectName("auto_heal_threshold")
+        self.auto_heal_threshold.setText("2.0")
+        self.auto_heal_threshold.setFixedWidth(40)
+        self.auto_heal_threshold.setAlignment(Qt.AlignCenter)
+        row6.addWidget(self.auto_heal_threshold)
+
+        row6.addWidget(CaptionLabel("熔断隔离(分):", self))
+        self.auto_heal_cooldown = LineEdit(self)
+        self.auto_heal_cooldown.setObjectName("auto_heal_cooldown")
+        self.auto_heal_cooldown.setText("15")
+        self.auto_heal_cooldown.setFixedWidth(36)
+        self.auto_heal_cooldown.setAlignment(Qt.AlignCenter)
+        row6.addWidget(self.auto_heal_cooldown)
+
+        self.chk_minimize_to_tray = CheckBox("关闭窗口时最小化至托盘静默守护", self)
+        self.chk_minimize_to_tray.setObjectName("chk_minimize_to_tray")
+        self.chk_minimize_to_tray.setChecked(True)
+        row6.addWidget(self.chk_minimize_to_tray)
+
+        self.btn_diagnose_link = PushButton("⚡ 诊断当前链路", self)
+        self.btn_diagnose_link.setObjectName("btn_diagnose_link")
+        row6.addWidget(self.btn_diagnose_link)
+
+        row6.addStretch(1)
+
+        self.lbl_auto_heal_status = CaptionLabel("🟢 链路守卫中 (今日自愈: 0 次)", self)
+        self.lbl_auto_heal_status.setObjectName("lbl_auto_heal_status")
+        self.lbl_auto_heal_status.setStyleSheet("color: #34d399; font-weight: bold;")
+        row6.addWidget(self.lbl_auto_heal_status)
+
+        layout.addLayout(row6)
+
         self.setStyleSheet("""
             PipelineCard {
                 background-color: rgba(30, 34, 50, 0.6);
@@ -6214,19 +7032,29 @@ class TopBar(QWidget):
         """)
 ```
 
-## File: `gui_fluent/components/__init__.py`
+## File: `gui_fluent/pages/__init__.py`
 
 ```python
 """
-Fluent UI 通用界面组件模块
+Fluent UI 各功能页面模块导出
 """
-from gui_fluent.components.top_bar import TopBar
-from gui_fluent.components.log_panel import LogPanel
-from gui_fluent.components.bottom_action_bar import BottomActionBar
-from gui_fluent.components.pipeline_card import PipelineCard
+from gui_fluent.pages.page_active import PageActive
+from gui_fluent.pages.page_favorites import PageFavorites
+from gui_fluent.pages.page_verified import PageVerified
+from gui_fluent.pages.page_stars import PageStars
+from gui_fluent.pages.page_delay_black import PageDelayBlack
+from gui_fluent.pages.page_speed_black import PageSpeedBlack
+from gui_fluent.pages.page_cloud_text import PageCloudText
 
-__all__ = ["TopBar", "LogPanel", "BottomActionBar", "PipelineCard"]
-
+__all__ = [
+    "PageActive",
+    "PageFavorites",
+    "PageVerified",
+    "PageStars",
+    "PageDelayBlack",
+    "PageSpeedBlack",
+    "PageCloudText",
+]
 ```
 
 ## File: `gui_fluent/pages/page_active.py`
@@ -6435,6 +7263,8 @@ class CloudTextCard(SimpleCardWidget):
         """切换加载状态"""
         self.btn_fetch.setEnabled(not is_loading)
         self.btn_push.setEnabled(not is_loading)
+        if hasattr(self, "btn_purge"):
+            self.btn_purge.setEnabled(not is_loading)
         if is_loading:
             self.btn_fetch.setText("⏳ 同步中...")
         else:
@@ -6681,6 +7511,7 @@ class PageCloudText(QWidget):
 
         import threading
         threading.Thread(target=_worker, daemon=True).start()
+
 
 
 ```
@@ -7417,29 +8248,16 @@ class PageVerified(QWidget):
 
 ```
 
-## File: `gui_fluent/pages/__init__.py`
+## File: `gui_fluent/pipelines/__init__.py`
 
 ```python
 """
-Fluent UI 各功能页面模块导出
+Fluent 流水线模块
 """
-from gui_fluent.pages.page_active import PageActive
-from gui_fluent.pages.page_favorites import PageFavorites
-from gui_fluent.pages.page_verified import PageVerified
-from gui_fluent.pages.page_stars import PageStars
-from gui_fluent.pages.page_delay_black import PageDelayBlack
-from gui_fluent.pages.page_speed_black import PageSpeedBlack
-from gui_fluent.pages.page_cloud_text import PageCloudText
+from gui_fluent.pipelines.auto_pipeline import AutoPipelineWorker
+from gui_fluent.pipelines.fav_pipeline import FavPipelineWorker
 
-__all__ = [
-    "PageActive",
-    "PageFavorites",
-    "PageVerified",
-    "PageStars",
-    "PageDelayBlack",
-    "PageSpeedBlack",
-    "PageCloudText",
-]
+__all__ = ["AutoPipelineWorker", "FavPipelineWorker"]
 ```
 
 ## File: `gui_fluent/pipelines/auto_pipeline.py`
@@ -7466,7 +8284,7 @@ else:
 
 from services.subscription_service import get_node_endpoint, choose_canonical_node_name
 from services.colo_service import is_asian_node, analyze_colo_stats, record_colo_sample
-from services.probe_service import get_cf_colo_raw, tcp_ping
+from services.probe_service import get_cf_colo_raw
 from services.clash_client import ClashClient, ClashModeGuard, find_cf_donor_node, fission_clean_ips
 from services.script_generator import build_script_js, write_script_js
 from services.pool_service import (
@@ -7538,16 +8356,16 @@ class AutoPipelineWorker(QThread):
     def run(self):
         self.log_signal.emit("🚀 启动一整套全自动大优选流程 (Fluent 后台线程)...")
         try:
-            # 0. 解析配置参数
+            # 0. 解析配置参数（严格依据 UI 面板设置决定初筛轮数与超时，严禁硬编码与截断）
             max_delay = int(self.config.get("max_delay", 100)) if str(self.config.get("max_delay", "")).isdigit() else 100
             try:
                 min_speed = float(self.config.get("min_speed", 5.0))
             except Exception:
                 min_speed = 5.0
-            # 极限淘汰制：严格初筛轮数为 2 轮
-            rounds = 2
-            raw_timeout = int(self.config.get("test_timeout", 500)) if str(self.config.get("test_timeout", "")).isdigit() else 500
-            timeout_ms = min(500, raw_timeout)
+
+            # 严格恢复按 UI 设置的轮数与超时（不再硬编码 rounds=2 与 500ms 超时）
+            rounds = max(1, int(self.config.get("test_rounds", 4))) if str(self.config.get("test_rounds", "")).isdigit() else 4
+            timeout_ms = max(200, int(self.config.get("test_timeout", 1500))) if str(self.config.get("test_timeout", "")).isdigit() else 1500
             try:
                 duration = max(0.5, float(self.config.get("speed_duration", 3.0)))
             except Exception:
@@ -7638,6 +8456,7 @@ class AutoPipelineWorker(QThread):
                     self.controller.state.blacklist_reasons,
                     _get_ep,
                     is_asian_node,
+                    node_colo_dict=self.controller.state.node_colo,
                 )
 
                 fav_eps, bl_eps, sbl_eps, star_eps = get_pool_endpoint_sets(
@@ -7657,13 +8476,14 @@ class AutoPipelineWorker(QThread):
                 ver_sk = 0
 
                 for n in self.controller.state.all_nodes:
-                    if not is_asian_node(n):
+                    ep = _get_ep(n)
+                    c_val = self.controller.state.node_colo.get(n, self.controller.state.node_colo.get(ep, "-"))
+                    if not is_asian_node(n, colo=c_val):
                         if n not in self.controller.state.local_blacklist:
                             self.controller.state.local_blacklist.add(n)
                             self.controller.state.blacklist_reasons[n] = "非亚洲节点 (自动过滤)"
                         continue
 
-                    ep = _get_ep(n)
                     if n in self.controller.state.local_blacklist or (ep and ep in self.controller.state.local_blacklist):
                         d_sk += 1
                         continue
@@ -7675,7 +8495,7 @@ class AutoPipelineWorker(QThread):
                     if n in self.controller.state.favorites or (ep and ep in fav_eps):
                         _should_purge = False
                         _purge_reason = ""
-                        if not is_asian_node(n):
+                        if not is_asian_node(n, colo=c_val):
                             _should_purge = True
                             _purge_reason = "非亚洲地区/命名"
                         else:
@@ -7760,278 +8580,204 @@ class AutoPipelineWorker(QThread):
             self.rows_updated.emit([dict(r) for r in test_rows])
             self.status_signal.emit(f"待测节点: {len(test_rows)} 个")
 
-            # 2. 并发延迟初筛 (两轮极限淘汰制 Fail-Fast，接入双轨测速分流)
-            self.log_signal.emit(f"⚡ 开始执行两轮极限淘汰制初筛 (全量待测端点共 {len(unique_eps)} 个，单次超时上限: {timeout_ms}ms)...")
+            # 2. 多轮真实代理延迟初筛 (严格按设置参数 rounds 与 timeout_ms 执行真实链路测试)
+            self.log_signal.emit(
+                f"⚡ 开始执行 {rounds} 轮真实代理延迟初筛 (独立端点共 {len(unique_eps)} 个，单次超时上限: {timeout_ms}ms)..."
+            )
+
+            # 建立物理端点 -> 内核代理节点映射表，确保 100% 真实代理应用层测速
+            core_proxies = self.controller.clash_client.get_proxies()
+            ep_to_core_node = {}
+            for p_name, p_info in core_proxies.items():
+                if isinstance(p_info, dict):
+                    s = p_info.get("server", "").strip()
+                    p = str(p_info.get("port", "443")).strip()
+                    if s:
+                        ep_to_core_node[f"{s}:{p}"] = p_name
 
             all_known_nodes = set(self.controller.state.all_nodes)
 
-            def _measure_endpoint_delay(endpoint: str, rep_node: str, t_ms: int) -> int:
-                """
-                双轨分流测速引擎：
-                1. 订阅已有实体代理节点：调用 Clash 内核 RESTful 接口执行真实链路测速；
-                2. pending.txt 等未入库裸端点：通过原生 Socket tcp_ping 进行真实 TCP SYN 握手探活；
-                彻底杜绝向 Clash 内核请求不存在的节点导致 404 秒级误杀！
-                """
-                # 轨道 A: 节点已在 Clash 订阅代理列表中
-                if rep_node in all_known_nodes:
-                    return self.controller.clash_client.query_proxy_delay(rep_node, test_url, timeout_ms=t_ms)
-
-                # 轨道 B: 裸端点（未在 Clash 代理树中注册）
-                target_host = endpoint
-                target_port = 443
-                if ":" in target_host:
-                    parts = target_host.split(":", 1)
-                    target_host = parts[0].strip()
-                    if parts[1].isdigit():
-                        target_port = int(parts[1])
-
-                timeout_sec = max(0.2, min(0.5, t_ms / 1000.0))
-                return tcp_ping(target_host, port=target_port, timeout=timeout_sec)
-
-            # ======================== 第 1 轮：全量普筛与极速淘汰 ========================
-            round1_survivors = []
-            survivor_lock = threading.Lock()
-            total_pending = len(unique_eps)
-            done_r1 = 0
-            last_log_emit = 0.0
-            last_status_emit = 0.0
-
-            def _test_round1(endpoint):
+            for r in range(1, rounds + 1):
                 if self.isInterruptionRequested():
-                    return
-                rep_node = choose_canonical_node_name(ep_to_untested[endpoint])
-                cur_delay = _measure_endpoint_delay(endpoint, rep_node, timeout_ms)
+                    break
 
-                # 淘汰判定 (Fail-Fast: 真实超时或延迟超标即刻出清)
-                if cur_delay >= 99999 or cur_delay > max_delay or cur_delay >= bl_delay_threshold:
-                    if cur_delay >= 99999:
-                        reason = "首轮初筛超时 (≥99999ms)"
-                    elif cur_delay >= bl_delay_threshold:
-                        reason = f"首轮延迟超标 ({cur_delay}ms ≥ {bl_delay_threshold}ms)"
+                total_eps = len(unique_eps)
+                done_cnt = 0
+                alive_cnt = 0
+                done_lock = threading.Lock()
+                last_log_t = 0.0
+                last_status_t = 0.0
+
+                def _single_delay(endpoint):
+                    if self.isInterruptionRequested():
+                        return
+                    rep_node = choose_canonical_node_name(ep_to_untested[endpoint])
+                    target_proxy_name = None
+                    if rep_node in core_proxies:
+                        target_proxy_name = rep_node
+                    elif rep_node in all_known_nodes and rep_node in core_proxies:
+                        target_proxy_name = rep_node
+                    elif endpoint in ep_to_core_node:
+                        target_proxy_name = ep_to_core_node[endpoint]
+
+                    if target_proxy_name:
+                        # 100% 真实代理链路测速：调用内核 RESTful API 发起真实 HTTP/HTTPS 延迟探测
+                        cur_delay = self.controller.clash_client.query_proxy_delay(target_proxy_name, test_url, timeout_ms=timeout_ms)
                     else:
-                        reason = f"首轮延迟淘汰 ({cur_delay}ms > {max_delay}ms)"
+                        # 纯正测速原则：严禁使用 TCP ping 降级伪造代理延迟！内核未挂载的端点直接判定超时
+                        cur_delay = 99999
 
-                    now_bl_t = time.time()
                     with self.controller.state.lock:
-                        self.controller.state.local_blacklist.add(rep_node)
-                        self.controller.state.favorites.discard(rep_node)
-                        self.controller.state.blacklist_reasons[rep_node] = reason
-                        self.controller.state.blacklist_timestamps[rep_node] = now_bl_t
-                        if endpoint:
-                            self.controller.state.local_blacklist.add(endpoint)
-                            self.controller.state.blacklist_reasons[endpoint] = reason
-                            self.controller.state.blacklist_timestamps[endpoint] = now_bl_t
-                        for same_n in ep_to_untested.get(endpoint, []):
-                            self.controller.state.local_blacklist.add(same_n)
-                            self.controller.state.favorites.discard(same_n)
-                            self.controller.state.blacklist_reasons[same_n] = reason
-                            self.controller.state.blacklist_timestamps[same_n] = now_bl_t
-                        if endpoint in self.controller.state.verified_nodes:
-                            del self.controller.state.verified_nodes[endpoint]
+                        if cur_delay < 99999:
+                            _record_delay_sample(self.controller.state.node_delay_history, endpoint, cur_delay)
+                        for n in ep_to_untested[endpoint]:
+                            self.controller.state.node_delays[n] = cur_delay
+                            hist = self.controller.state.node_history.setdefault(n, [])
+                            hist.append(cur_delay)
+                            self.controller.state.node_history[n] = hist[-rounds:]
+                            if cur_delay < 99999:
+                                _record_delay_sample(self.controller.state.node_delay_history, n, cur_delay)
 
                     row_ref = ep_to_row.get(endpoint)
                     if row_ref:
-                        row_ref["status"] = "首轮淘汰"
-                        row_ref["reason"] = reason
                         row_ref["delay"] = f"{cur_delay}ms" if cur_delay < 99999 else "超时"
-                else:
-                    # 首轮合格幸存
-                    with self.controller.state.lock:
-                        _record_delay_sample(self.controller.state.node_delay_history, rep_node, cur_delay, ep=endpoint)
-                        for n in ep_to_untested[endpoint]:
-                            self.controller.state.node_delays[n] = cur_delay
-                            hist = self.controller.state.node_history.setdefault(n, [])
-                            hist.append(cur_delay)
-                            self.controller.state.node_history[n] = hist[-2:]
+                        h_vals = self.controller.state.node_history.get(rep_node, [])
+                        row_ref["delay_hist"] = "/".join(str(v) if v < 99999 else "超时" for v in h_vals)
+                        valid_vals = [v for v in h_vals if v < 99999]
+                        if valid_vals:
+                            row_ref["avg_delay"] = f"{int(sum(valid_vals)/len(valid_vals))} ms"
 
-                    row_ref = ep_to_row.get(endpoint)
-                    if row_ref:
-                        row_ref["delay"] = f"{cur_delay}ms"
-                        row_ref["status"] = "首轮达标 (待复测)"
-                        row_ref["delay_hist"] = str(cur_delay)
+                    nonlocal done_cnt, alive_cnt, last_log_t, last_status_t
+                    with done_lock:
+                        done_cnt += 1
+                        if cur_delay < 99999:
+                            alive_cnt += 1
+                        now_t = time.time()
+                        # 每 50 个节点步长，或经过 1 秒，或最后一批时输出透明平滑进度
+                        step_cond = (done_cnt % 50 == 0) or (now_t - last_log_t >= 1.0) or (done_cnt == total_eps)
+                        if step_cond:
+                            last_log_t = now_t
+                            pct = int(done_cnt * 100 / total_eps)
+                            cur_d_str = f"{cur_delay}ms" if cur_delay < 99999 else "超时"
+                            self.log(
+                                f"⚡ [初筛第 {r}/{rounds} 轮] 进度: {done_cnt}/{total_eps} ({pct}%) | "
+                                f"实时存活: {alive_cnt} 个 | 最新端点: {endpoint} ({cur_d_str})"
+                            )
+                        if (now_t - last_status_t >= 0.5) or done_cnt == total_eps:
+                            last_status_t = now_t
+                            self.status_signal.emit(f"延迟初筛中: 第 {r}/{rounds} 轮 ({done_cnt}/{total_eps}) 存活:{alive_cnt}")
 
-                    with survivor_lock:
-                        round1_survivors.append(endpoint)
+                with ThreadPoolExecutor(max_workers=min(20, len(unique_eps))) as executor:
+                    list(executor.map(_single_delay, unique_eps))
 
-            # 并发严格压制在 max_workers = 40，防止 Windows 端口与 Socket 缓冲耗尽
-            with ThreadPoolExecutor(max_workers=min(40, len(unique_eps))) as executor:
-                futures_r1 = {executor.submit(_test_round1, ep): ep for ep in unique_eps}
-                for fut in as_completed(futures_r1):
-                    if self.isInterruptionRequested():
-                        break
-                    done_r1 += 1
-                    now_ts = time.time()
-
-                    # 时间戳节流心跳：每 1 秒输出一次控制台进度日志
-                    if (now_ts - last_log_emit >= 1.0) or done_r1 == total_pending:
-                        last_log_emit = now_ts
-                        with survivor_lock:
-                            s_cnt = len(round1_survivors)
-                        failed_cnt = done_r1 - s_cnt
-                        self.log(f"⚡ [初筛第1轮进度] {done_r1}/{total_pending} | 存活: {s_cnt} | 淘汰: {failed_cnt}")
-
-                    # 状态栏节流更新 (>= 0.5s)
-                    if (now_ts - last_status_emit >= 0.5) or done_r1 == total_pending:
-                        last_status_emit = now_ts
-                        with survivor_lock:
-                            s_cnt = len(round1_survivors)
-                        self.status_signal.emit(f"初筛第 1/2 轮 (全量淘汰): {done_r1}/{total_pending} [幸存 {s_cnt}]")
+                self.rows_updated.emit([dict(x) for x in test_rows])
+                if self.isInterruptionRequested():
+                    break
+                time.sleep(0.5)
 
             if self.isInterruptionRequested():
                 self.log("⏹ 用户已终止流水线任务")
                 self.finished_signal.emit(False, "任务已被用户手动终止")
                 return
 
-            self.log(f"🏁 [第1轮初筛完毕] 共生还 {len(round1_survivors)} 个节点，立即转入第 2 轮复筛...")
-
-            if not round1_survivors:
-                self.status_signal.emit("首轮全军覆没")
-                self.finished_signal.emit(True, f"延迟初筛结束：{total_pending} 个待测节点在首轮测试中全部超时或超标。")
-                return
-
-            # ======================== 第 2 轮：幸存者极限复测 ========================
-            round2_survivors = []
+            # 3. 达标排查与淘汰审计 (全部轮次完整跑完后，结合最佳延迟门槛、黑名单门槛与抖动机制综合审计)
             candidates = []
-            total_r2 = len(round1_survivors)
-            done_r2 = 0
-            last_log_emit_r2 = 0.0
-            last_status_emit_r2 = 0.0
-
-            def _test_round2(endpoint):
+            newly_delay_blacklisted = 0
+            for n in test_targets:
                 if self.isInterruptionRequested():
-                    return
-                ep = endpoint
-                rep_node = choose_canonical_node_name(ep_to_untested[endpoint])
-                cur_delay = _measure_endpoint_delay(endpoint, rep_node, timeout_ms)
+                    break
+                ep = _get_ep(n)
+                hist = self.controller.state.node_history.get(n, [])
+                best_delay = min(hist[-rounds:]) if hist else 99999
 
-                # 复测淘汰判定 (要求 100% 全通率)
-                if cur_delay >= 99999 or cur_delay > max_delay or cur_delay >= bl_delay_threshold:
-                    if cur_delay >= 99999:
-                        reason = "次轮复测超时波动 (≥99999ms)"
-                    elif cur_delay >= bl_delay_threshold:
-                        reason = f"次轮复测延迟超标 ({cur_delay}ms ≥ {bl_delay_threshold}ms)"
+                # 延迟未达到设定要求 (> max_delay) 或超时 (>= 99999) 或超标 (>= bl_delay_threshold) 淘汰拉黑
+                if best_delay > max_delay or best_delay >= bl_delay_threshold or best_delay >= 99999:
+                    if best_delay >= 99999:
+                        d_reason = "延迟超时 (≥99999ms)"
+                    elif best_delay >= bl_delay_threshold:
+                        d_reason = f"延迟超标 ({best_delay}ms ≥ {bl_delay_threshold}ms)"
                     else:
-                        reason = f"次轮复测超标 ({cur_delay}ms > {max_delay}ms)"
+                        d_reason = f"延迟淘汰 ({best_delay}ms > {max_delay}ms)"
 
                     now_bl_t = time.time()
                     with self.controller.state.lock:
-                        self.controller.state.local_blacklist.add(rep_node)
-                        self.controller.state.favorites.discard(rep_node)
-                        self.controller.state.blacklist_reasons[rep_node] = reason
-                        self.controller.state.blacklist_timestamps[rep_node] = now_bl_t
-                        if endpoint:
-                            self.controller.state.local_blacklist.add(endpoint)
-                            self.controller.state.blacklist_reasons[endpoint] = reason
-                            self.controller.state.blacklist_timestamps[endpoint] = now_bl_t
-                        for same_n in ep_to_untested.get(endpoint, []):
+                        self.controller.state.local_blacklist.add(n)
+                        self.controller.state.favorites.discard(n)
+                        self.controller.state.blacklist_reasons[n] = d_reason
+                        self.controller.state.blacklist_timestamps[n] = now_bl_t
+                        if ep:
+                            self.controller.state.local_blacklist.add(ep)
+                            self.controller.state.blacklist_reasons[ep] = d_reason
+                            self.controller.state.blacklist_timestamps[ep] = now_bl_t
+                        for same_n in ep_to_untested.get(ep, []):
                             self.controller.state.local_blacklist.add(same_n)
                             self.controller.state.favorites.discard(same_n)
-                            self.controller.state.blacklist_reasons[same_n] = reason
+                            self.controller.state.blacklist_reasons[same_n] = d_reason
                             self.controller.state.blacklist_timestamps[same_n] = now_bl_t
-                        if endpoint in self.controller.state.verified_nodes:
-                            del self.controller.state.verified_nodes[endpoint]
+                        if ep in self.controller.state.verified_nodes:
+                            del self.controller.state.verified_nodes[ep]
 
-                    row_ref = ep_to_row.get(endpoint)
-                    if row_ref:
-                        row_ref["status"] = "次轮淘汰"
-                        row_ref["reason"] = reason
-                        h_vals = self.controller.state.node_history.get(rep_node, [])
-                        row_ref["delay_hist"] = "/".join(str(v) if v < 99999 else "超时" for v in h_vals) + f"/{cur_delay if cur_delay < 99999 else '超时'}"
-                else:
-                    # 记录第 2 轮样本
+                    if ep in ep_to_row:
+                        ep_to_row[ep]["status"] = "延迟淘汰"
+                        ep_to_row[ep]["reason"] = d_reason
+
+                    newly_delay_blacklisted += 1
+                    continue
+
+                # 节点抖动拉黑机制：最低延迟≥设定值且向上抖动≥设定值，立即拉黑淘汰（最高延迟<设定最低延迟则豁免）
+                is_j_bad, j_min, j_up = check_node_jitter_blacklisted(
+                    hist[-rounds:], jitter_min_d, jitter_up_th
+                )
+                if is_j_bad:
+                    j_reason = f"延迟抖动淘汰 (底{j_min}ms 抖动+{j_up}ms)"
+                    now_bl_t = time.time()
                     with self.controller.state.lock:
-                        _record_delay_sample(self.controller.state.node_delay_history, rep_node, cur_delay, ep=endpoint)
-                        for n in ep_to_untested[endpoint]:
-                            self.controller.state.node_delays[n] = cur_delay
-                            hist = self.controller.state.node_history.setdefault(n, [])
-                            hist.append(cur_delay)
-                            self.controller.state.node_history[n] = hist[-2:]
+                        self.controller.state.local_blacklist.add(n)
+                        self.controller.state.favorites.discard(n)
+                        self.controller.state.blacklist_reasons[n] = j_reason
+                        self.controller.state.blacklist_timestamps[n] = now_bl_t
+                        if ep:
+                            self.controller.state.local_blacklist.add(ep)
+                            self.controller.state.blacklist_reasons[ep] = j_reason
+                            self.controller.state.blacklist_timestamps[ep] = now_bl_t
+                        for same_n in ep_to_untested.get(ep, []):
+                            self.controller.state.local_blacklist.add(same_n)
+                            self.controller.state.favorites.discard(same_n)
+                            self.controller.state.blacklist_reasons[same_n] = j_reason
+                            self.controller.state.blacklist_timestamps[same_n] = now_bl_t
+                        if ep in self.controller.state.verified_nodes:
+                            del self.controller.state.verified_nodes[ep]
 
-                    # 抖动判定
-                    hist = self.controller.state.node_history.get(rep_node, [])
-                    is_j_bad, j_min, j_up = check_node_jitter_blacklisted(hist[-2:], jitter_min_d, jitter_up_th)
-                    if is_j_bad:
-                        j_reason = f"延迟抖动淘汰 (底{j_min}ms 抖动+{j_up}ms)"
-                        now_bl_t = time.time()
-                        with self.controller.state.lock:
-                            self.controller.state.local_blacklist.add(rep_node)
-                            self.controller.state.favorites.discard(rep_node)
-                            self.controller.state.blacklist_reasons[rep_node] = j_reason
-                            self.controller.state.blacklist_timestamps[rep_node] = now_bl_t
-                            if endpoint:
-                                self.controller.state.local_blacklist.add(endpoint)
-                                self.controller.state.blacklist_reasons[ep] = j_reason
-                                self.controller.state.blacklist_timestamps[ep] = now_bl_t
-                            for same_n in ep_to_untested.get(endpoint, []):
-                                self.controller.state.local_blacklist.add(same_n)
-                                self.controller.state.favorites.discard(same_n)
-                                self.controller.state.blacklist_reasons[same_n] = j_reason
-                                self.controller.state.blacklist_timestamps[same_n] = now_bl_t
-                            if endpoint in self.controller.state.verified_nodes:
-                                del self.controller.state.verified_nodes[endpoint]
+                    if ep in ep_to_row:
+                        ep_to_row[ep]["status"] = "抖动淘汰"
+                        ep_to_row[ep]["reason"] = j_reason
 
-                        row_ref = ep_to_row.get(endpoint)
-                        if row_ref:
-                            row_ref["status"] = "抖动淘汰"
-                            row_ref["reason"] = j_reason
-                    else:
-                        # 双轮全通，准入合格
-                        cur_avg, hist_avg = compute_delay_stats(
-                            rep_node,
-                            ep=endpoint,
-                            node_history=self.controller.state.node_history,
-                            node_delays=self.controller.state.node_delays,
-                            node_delay_history=self.controller.state.node_delay_history,
-                            get_node_endpoint_fn=_get_ep,
-                        )
-                        row_ref = ep_to_row.get(endpoint)
-                        if row_ref:
-                            row_ref["status"] = "初筛合格"
-                            row_ref["reason"] = f"双轮全通 (均值 {cur_avg})"
-                            row_ref["avg_delay"] = cur_avg
-                            row_ref["hist_avg"] = hist_avg
-                            h_vals = self.controller.state.node_history.get(rep_node, [])
-                            row_ref["delay_hist"] = "/".join(str(v) if v < 99999 else "超时" for v in h_vals)
+                    newly_delay_blacklisted += 1
+                    self.log(f"【抖动淘汰】节点 {n} 最低延迟 {j_min}ms (≥{jitter_min_d}ms)，向上抖动 +{j_up}ms (≥{jitter_up_th}ms)，拉黑淘汰！")
+                    continue
 
-                        with survivor_lock:
-                            round2_survivors.append(endpoint)
-                            candidates.append(rep_node)
+                cur_avg, hist_avg = compute_delay_stats(
+                    n,
+                    ep=ep,
+                    node_history=self.controller.state.node_history,
+                    node_delays=self.controller.state.node_delays,
+                    node_delay_history=self.controller.state.node_delay_history,
+                    get_node_endpoint_fn=_get_ep,
+                )
+                if ep in ep_to_row:
+                    ep_to_row[ep]["status"] = "初筛达标"
+                    ep_to_row[ep]["reason"] = f"延迟达标 ({best_delay}ms ≤ {max_delay}ms)"
+                    ep_to_row[ep]["avg_delay"] = cur_avg
+                    ep_to_row[ep]["hist_avg"] = hist_avg
 
-            # 并发严格压制在 max_workers = 40
-            with ThreadPoolExecutor(max_workers=min(40, len(round1_survivors))) as executor:
-                futures_r2 = {executor.submit(_test_round2, ep): ep for ep in round1_survivors}
-                for fut in as_completed(futures_r2):
-                    if self.isInterruptionRequested():
-                        break
-                    done_r2 += 1
-                    now_ts = time.time()
-
-                    # 时间戳节流心跳：每 1 秒输出一次控制台进度日志
-                    if (now_ts - last_log_emit_r2 >= 1.0) or done_r2 == total_r2:
-                        last_log_emit_r2 = now_ts
-                        with survivor_lock:
-                            s_cnt = len(candidates)
-                        failed_cnt = done_r2 - s_cnt
-                        self.log(f"⚡ [复测第2轮进度] {done_r2}/{total_r2} | 存活: {s_cnt} | 淘汰: {failed_cnt}")
-
-                    # 状态栏节流更新 (>= 0.5s)
-                    if (now_ts - last_status_emit_r2 >= 0.5) or done_r2 == total_r2:
-                        last_status_emit_r2 = now_ts
-                        with survivor_lock:
-                            s_cnt = len(candidates)
-                        self.status_signal.emit(f"初筛第 2/2 轮 (极限复测): {done_r2}/{total_r2} [合格 {s_cnt}]")
-
-            if self.isInterruptionRequested():
-                self.log("⏹ 用户已终止流水线任务")
-                self.finished_signal.emit(False, "任务已被用户手动终止")
-                return
+                candidates.append(n)
 
             self.log(
-                f"🏁 [第2轮复筛完毕] 最终晋级 {len(candidates)} 个高质节点，立即转入 Colo 测定与测速..."
+                f"🏁 [延迟初筛完毕] 共 {len(candidates)} 个候选节点达标 (≤{max_delay}ms，淘汰超标/抖动: {newly_delay_blacklisted} 个)，立即转入真实 Colo 测定与测速..."
             )
 
-            # 仅保留通过双轮考核合格的端点行，单次通知 UI 表格装配
-            surviving_eps = set(round2_survivors)
+            # 仅保留通过延迟考核合格的端点行，单次通知 UI 表格装配
+            surviving_eps = { _get_ep(c) for c in candidates if _get_ep(c) }
             test_rows = [r for r in test_rows if r.get("endpoint") in surviving_eps]
             ep_to_row = { r["endpoint"]: r for r in test_rows if "endpoint" in r }
             self.rows_updated.emit([dict(x) for x in test_rows])
@@ -8039,7 +8785,7 @@ class AutoPipelineWorker(QThread):
 
             if not candidates:
                 self.status_signal.emit("无达标节点")
-                self.finished_signal.emit(True, "延迟初筛结束：所有节点均未能通过两轮极限淘汰考核。")
+                self.finished_signal.emit(True, f"延迟初筛结束：所有待测节点延迟均未达到 ≤{max_delay}ms。")
                 return
 
             # 3. 真实 Colo 测定与防漂移审计 (Step 3/4)
@@ -8208,6 +8954,7 @@ class AutoPipelineWorker(QThread):
                         if row_ref:
                             row_ref["status"] = f"带宽测速中 [{idx}/{total_cand}]"
                             self.rows_updated.emit([dict(r) for r in test_rows])
+                        self.log(f"🌐 [真实带宽测速 {idx}/{total_cand}] 正在测试节点真实下行: {node_name} (采样 {duration}s)...")
 
                         if ep in tested_endpoint_speeds:
                             speed_val = tested_endpoint_speeds[ep]
@@ -8295,11 +9042,15 @@ class AutoPipelineWorker(QThread):
 
                         if speed_val >= min_speed and is_asian_node(node_name, colo=colo):
                             coronated_name = f"{colo} {speed_val:.2f} MB/s"
-                            premium_nodes.append(node_name)
+                            fav_target_name = coronated_name if coronated_name else node_name
+                            premium_nodes.append(fav_target_name)
                             with self.controller.state.lock:
-                                self.controller.state.favorites.add(node_name)
-                                d_val = self.controller.state.node_delays.get(node_name, 0)
-                                self.controller.state.fav_reasons[node_name] = f"真实测速达标 ({speed_val:.2f}MB/s)"
+                                self.controller.state.favorites.add(fav_target_name)
+                                if node_name != fav_target_name:
+                                    self.controller.state.favorites.discard(node_name)
+                                    self.controller._migrate_node_name(node_name, fav_target_name, ep)
+                                d_val = self.controller.state.node_delays.get(fav_target_name, self.controller.state.node_delays.get(node_name, 0))
+                                self.controller.state.fav_reasons[fav_target_name] = f"真实测速达标 ({speed_val:.2f}MB/s)"
                                 if ep:
                                     self.controller.state.cloud_endpoints[ep] = coronated_name
                                     if ":" in ep:
@@ -8310,8 +9061,8 @@ class AutoPipelineWorker(QThread):
                                 row_ref["status"] = "优质精选"
                                 row_ref["reason"] = f"下行 {speed_val:.2f} MB/s ≥ {min_speed} MB/s"
 
-                            self.log_signal.emit(f"⭐ 节点入选精选: {coronated_name} ({ep}) (下行: {speed_val:.2f} MB/s)")
-                            test_rows = [r for r in test_rows if r.get("endpoint") != ep and r.get("name") != node_name]
+                            self.log_signal.emit(f"⭐ [优质入选] 节点入选精选: {coronated_name} ({ep}) (实测下行: {speed_val:.2f} MB/s ≥ {min_speed} MB/s)")
+                            test_rows = [r for r in test_rows if r.get("endpoint") != ep and r.get("name") not in (node_name, fav_target_name)]
                             self.rows_updated.emit([dict(r) for r in test_rows])
                             self.controller.data_changed.emit()
 
@@ -8339,9 +9090,12 @@ class AutoPipelineWorker(QThread):
                                 if ep in self.controller.state.verified_nodes:
                                     del self.controller.state.verified_nodes[ep]
 
-                            newly_speed_blacklisted += 1
+                            if row_ref:
+                                row_ref["status"] = "低速淘汰"
+                                row_ref["reason"] = spd_reason
 
-                            self.log_signal.emit(f"【低速淘汰】节点 {node_name} 速度 {speed_val:.2f} MB/s 未达标 (≥{min_speed} MB/s)")
+                            newly_speed_blacklisted += 1
+                            self.log_signal.emit(f"【低速淘汰】节点 {node_name} 实测下行 {speed_val:.2f} MB/s 未达标 (门槛 ≥{min_speed} MB/s)")
                             test_rows = [r for r in test_rows if r.get("endpoint") != ep and r.get("name") != node_name]
                             self.rows_updated.emit([dict(r) for r in test_rows])
                             self.controller.data_changed.emit()
@@ -8410,6 +9164,8 @@ class AutoPipelineWorker(QThread):
                 star_group_tolerance=star_group_tolerance,
                 is_asian_node_fn=is_asian_node,
                 get_node_endpoint_fn=_get_ep,
+                cloud_endpoints=self.controller.state.cloud_endpoints,
+                node_colo=self.controller.state.node_colo,
             )
             write_ok, write_res = write_script_js(script_code)
             if write_ok:
@@ -8595,6 +9351,7 @@ class FavPipelineWorker(QThread):
                     blacklist_reasons=self.controller.state.blacklist_reasons,
                     get_node_endpoint_fn=_get_ep,
                     is_asian_node_fn=is_asian_node,
+                    node_colo_dict=self.controller.state.node_colo,
                 )
 
                 for f in list(self.controller.state.favorites):
@@ -8602,15 +9359,18 @@ class FavPipelineWorker(QThread):
                     # 如果能在当前订阅中找到该物理端点对应的实体节点
                     matched_proxy = current_ep_to_proxy.get(target_ep)
                     if matched_proxy:
-                        if matched_proxy not in seen_targets and is_asian_node(matched_proxy):
+                        c_val = self.controller.state.node_colo.get(matched_proxy, self.controller.state.node_colo.get(target_ep, "-"))
+                        if matched_proxy not in seen_targets and is_asian_node(matched_proxy, colo=c_val):
                             active_fav_targets.append(matched_proxy)
                             seen_targets.add(matched_proxy)
                             fav_origin_map[matched_proxy] = f
-                    elif f in self.controller.state.all_nodes and is_asian_node(f):
-                        if f not in seen_targets:
-                            active_fav_targets.append(f)
-                            seen_targets.add(f)
-                            fav_origin_map[f] = f
+                    elif f in self.controller.state.all_nodes:
+                        c_val = self.controller.state.node_colo.get(f, self.controller.state.node_colo.get(target_ep, "-"))
+                        if is_asian_node(f, colo=c_val):
+                            if f not in seen_targets:
+                                active_fav_targets.append(f)
+                                seen_targets.add(f)
+                                fav_origin_map[f] = f
 
             tot = len(active_fav_targets)
             self.log_signal.emit(f"优质池待复测节点共 {tot} 个 (已穿透对齐 C 段端点 | 达标即停={early_stop_enabled})")
@@ -8771,7 +9531,8 @@ class FavPipelineWorker(QThread):
             nohk_candidates = []
             with self.controller.state.lock:
                 for n in temp_passed:
-                    if not is_asian_node(n):
+                    c_val = self.controller.state.node_colo.get(n, self.controller.state.node_colo.get(_get_ep(n), "-"))
+                    if not is_asian_node(n, colo=c_val):
                         self.controller.state.local_blacklist.add(n)
                         self.controller.state.favorites.discard(n)
                         self.controller.state.blacklist_reasons[n] = "非亚洲地区/命名"
@@ -9048,6 +9809,8 @@ class FavPipelineWorker(QThread):
                         star_group_tolerance=star_group_tolerance,
                         is_asian_node_fn=is_asian_node,
                         get_node_endpoint_fn=_get_ep,
+                        cloud_endpoints=self.controller.state.cloud_endpoints,
+                        node_colo=self.controller.state.node_colo,
                     )
                     write_script_js(script_code)
                     trigger_verge_reactivate_hotkey()
@@ -9071,6 +9834,8 @@ class FavPipelineWorker(QThread):
                 star_group_tolerance=star_group_tolerance,
                 is_asian_node_fn=is_asian_node,
                 get_node_endpoint_fn=_get_ep,
+                cloud_endpoints=self.controller.state.cloud_endpoints,
+                node_colo=self.controller.state.node_colo,
             )
             write_ok, write_res = write_script_js(script_code)
             if write_ok:
@@ -9096,16 +9861,17 @@ class FavPipelineWorker(QThread):
             self.finished_signal.emit(False, f"执行异常: {str(e)}")
 ```
 
-## File: `gui_fluent/pipelines/__init__.py`
+## File: `gui_fluent/widgets/__init__.py`
 
 ```python
 """
-Fluent 流水线模块
+自定义 Fluent 风格小部件模块
 """
-from gui_fluent.pipelines.auto_pipeline import AutoPipelineWorker
-from gui_fluent.pipelines.fav_pipeline import FavPipelineWorker
+from gui_fluent.widgets.node_table import NodeTableView
+from gui_fluent.widgets.verified_table import VerifiedTableView
+from gui_fluent.widgets.stars_table import StarsTableView
 
-__all__ = ["AutoPipelineWorker", "FavPipelineWorker"]
+__all__ = ["NodeTableView", "VerifiedTableView", "StarsTableView"]
 ```
 
 ## File: `gui_fluent/widgets/c_miner_dialog.py`
@@ -10908,17 +11674,12 @@ class VerifiedTableView(QWidget):
         self.populate(sorted_rows)
 ```
 
-## File: `gui_fluent/widgets/__init__.py`
+## File: `pipelines/__init__.py`
 
 ```python
 """
-自定义 Fluent 风格小部件模块
+Clash Verge 节点管理助手 - 流水线与调度模块
 """
-from gui_fluent.widgets.node_table import NodeTableView
-from gui_fluent.widgets.verified_table import VerifiedTableView
-from gui_fluent.widgets.stars_table import StarsTableView
-
-__all__ = ["NodeTableView", "VerifiedTableView", "StarsTableView"]
 ```
 
 ## File: `pipelines/base_pipeline.py`
@@ -11081,53 +11842,1042 @@ class SchedulerDaemon:
                 pass
 ```
 
-## File: `pipelines/__init__.py`
+## File: `services/__init__.py`
 
 ```python
 """
-Clash Verge 节点管理助手 - 流水线与调度模块
+Clash Verge 节点管理助手 - 业务服务层
 """
+```
+
+## File: `services/auto_heal_watcher.py`
+
+```python
+"""
+services/auto_heal_watcher.py
+Mihomo 实时链路感知与秒级无感自愈守护服务 (多策略组与非香港业务隔离增强版)
+"""
+import datetime
+import re
+import threading
+import time
+import urllib.parse
+from typing import Callable, Dict, List, Optional, Set, Tuple
+
+from config.settings import EXCLUDE_HK_REGEX
+from services.clash_client import ClashClient
+
+
+class AutoHealWatcher:
+    """
+    后台常驻链路守护引擎：
+    1. 并发监听多个核心策略组 (⚡ 自动选择 / ⚡ 自动选择 (非香港))
+    2. 监听 Mihomo /connections API 抓取当前真实出口连接表 (CPU < 0.05%, 0额外外网流量)
+    3. 检测单向发包黑洞 (Upload > 0, Download == 0 且持续多秒)
+    4. 外科手术式斩断坏死连接 (DELETE /connections/{id}) 迫使客户端瞬间 TCP RST 重连
+    5. 严格业务与区域隔离：
+       - 【⚡ 自动选择 (非香港)】坏死时：严格在纯净非香港池（新加坡、日本、美国等）顺位补位，绝不切入香港！
+       - 【⚡ 自动选择】坏死时：在全量精选池中挑选最优低延迟节点补位
+    6. 熔断隔离坏死节点 15 分钟，防止反复横跳
+    """
+
+    def __init__(
+        self,
+        client: Optional[ClashClient] = None,
+        get_candidates_fn: Optional[Callable[..., List[str]]] = None,
+        on_heal_event: Optional[Callable[[str, str, dict], None]] = None,
+        on_status_update: Optional[Callable[[dict], None]] = None,
+        log_fn: Optional[Callable[[str], None]] = None,
+    ):
+        self.client = client or ClashClient()
+        self.get_candidates_fn = get_candidates_fn
+        self.on_heal_event = on_heal_event
+        self.on_status_update = on_status_update
+        self.log_fn = log_fn
+
+        # 核心超高速敏捷参数配置
+        self.enabled: bool = True
+        self.check_interval: float = 1.0           # 轮询探测心跳提升至 1.0 秒 (毫秒级敏捷响应)
+        self.blackhole_timeout: float = 2.0        # 单向黑洞判定时长缩短至 2.0 秒 (超敏捷捕获)
+        self.min_blackhole_hosts: int = 2          # 触发判定所需的最少并发异构域名数
+        self.probe_timeout_ms: int = 1200          # 哨兵微探针超时对齐客户端 (1200ms 容纳 VLESS TLS 冷启动与首包重传，彻底消除假超时)
+        self.cooldown_duration: float = 900.0      # 坏死节点临时熔断冷冻时长 (秒, 默认15分钟)
+        self.min_switch_interval: float = 8.0      # 连续自愈最小时间间隔 (防雪崩/防抖动)
+        self.probe_url: str = "http://www.gstatic.com/generate_204"  # 对齐客户端明文探测 URL，无多余 TLS 开销
+        
+        # Cloudflare 专属平滑自愈与防抽风参数
+        self.degrade_rtt_ms: int = 280            # 哨兵探针严重劣化判定门禁 (毫秒)
+        self.strike_min_interval: float = 10.0    # 两次黄牌认定的最小观察间隔 (秒, 避免1秒内连出两牌)
+        self.strike_window: float = 60.0          # 黄牌累积计分窗口 (秒)
+        self.yellow_cards: Dict[str, float] = {}  # {node_name: last_strike_timestamp}
+        self.soft_stall_bytes_limit: int = 3072   # 软失速下行速率下限 (字节/秒, 约3KB/s)
+        
+        # 守护的核心策略组清单
+        self.monitored_groups: List[str] = [
+            "⚡ 自动选择",
+            "⚡ 自动选择 (非香港)",
+        ]
+
+        # 内存热备候选队列缓存 (Pre-warmed Standby Cache, 0 延迟切换)
+        self.standby_cache: Dict[str, List[str]] = {}
+
+        # 运行时状态
+        self._thread: Optional[threading.Thread] = None
+        self._running: bool = False
+        self._lock = threading.Lock()
+        
+        self.cooldown_nodes: Dict[str, float] = {}  # {node_name: expire_timestamp}
+        self.healed_count: int = 0
+        self.last_heal_timestamp: float = 0.0
+        self.last_heal_info: Optional[dict] = None
+        
+        self.current_active_node: str = ""         # 全量出口当前在用
+        self.current_active_nohk_node: str = ""    # 非港出口当前在用
+        self.current_status_summary: str = "守护就绪"
+
+    def log(self, message: str):
+        if callable(self.log_fn):
+            try:
+                self.log_fn(message)
+            except Exception:
+                pass
+
+    def start(self):
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._running = True
+            self._thread = threading.Thread(
+                target=self._loop,
+                daemon=True,
+                name="AutoHealWatcherThread"
+            )
+            self._thread.start()
+            self.log("🛡️ [自愈引擎] 后台秒级链路守卫服务已启动 (双通道智能感知中)")
+
+    def stop(self):
+        with self._lock:
+            self._running = False
+
+    def is_running(self) -> bool:
+        return self._running and self._thread is not None and self._thread.is_alive()
+
+    def update_config(self, **kwargs):
+        with self._lock:
+            if "enabled" in kwargs:
+                self.enabled = bool(kwargs["enabled"])
+            if "check_interval" in kwargs:
+                try:
+                    self.check_interval = max(1.0, float(kwargs["check_interval"]))
+                except (ValueError, TypeError):
+                    pass
+            if "blackhole_timeout" in kwargs:
+                try:
+                    self.blackhole_timeout = max(1.5, float(kwargs["blackhole_timeout"]))
+                except (ValueError, TypeError):
+                    pass
+            if "cooldown_duration" in kwargs:
+                try:
+                    self.cooldown_duration = max(60.0, float(kwargs["cooldown_duration"]))
+                except (ValueError, TypeError):
+                    pass
+            if "degrade_rtt_ms" in kwargs:
+                try:
+                    self.degrade_rtt_ms = max(100, int(kwargs["degrade_rtt_ms"]))
+                except (ValueError, TypeError):
+                    pass
+            if "strike_min_interval" in kwargs:
+                try:
+                    self.strike_min_interval = max(5.0, float(kwargs["strike_min_interval"]))
+                except (ValueError, TypeError):
+                    pass
+            if "strike_window" in kwargs:
+                try:
+                    self.strike_window = max(10.0, float(kwargs["strike_window"]))
+                except (ValueError, TypeError):
+                    pass
+            if "probe_timeout_ms" in kwargs:
+                try:
+                    self.probe_timeout_ms = max(500, int(kwargs["probe_timeout_ms"]))
+                except (ValueError, TypeError):
+                    pass
+            if "probe_url" in kwargs and kwargs["probe_url"]:
+                self.probe_url = str(kwargs["probe_url"]).strip()
+            if "min_blackhole_hosts" in kwargs:
+                try:
+                    self.min_blackhole_hosts = max(1, int(kwargs["min_blackhole_hosts"]))
+                except (ValueError, TypeError):
+                    pass
+
+    def get_status_dict(self) -> dict:
+        now = time.time()
+        active_cooldowns = {k: int(v - now) for k, v in self.cooldown_nodes.items() if v > now}
+        active_yellow_cards = {k: int(v + self.strike_window - now) for k, v in self.yellow_cards.items() if (v + self.strike_window) > now}
+        return {
+            "enabled": self.enabled,
+            "running": self.is_running(),
+            "active_node": self.current_active_node,
+            "active_nohk_node": self.current_active_nohk_node,
+            "status_summary": self.current_status_summary,
+            "healed_count": self.healed_count,
+            "last_heal_time": self.last_heal_timestamp,
+            "last_heal_info": self.last_heal_info,
+            "cooldown_nodes_count": len(active_cooldowns),
+            "cooldown_nodes": active_cooldowns,
+            "yellow_cards_count": len(active_yellow_cards),
+            "yellow_cards": active_yellow_cards,
+        }
+
+    def _parse_start_time(self, start_str: str) -> float:
+        if not start_str:
+            return 0.0
+        try:
+            clean_str = start_str
+            if "+" in clean_str:
+                dt_part, tz_part = clean_str.split("+", 1)
+                if "." in dt_part:
+                    base, micro = dt_part.split(".", 1)
+                    clean_str = f"{base}.{micro[:6]}+{tz_part}"
+                dt = datetime.datetime.fromisoformat(clean_str)
+                return dt.timestamp()
+            elif "Z" in clean_str:
+                clean_str = clean_str.replace("Z", "+00:00")
+                dt = datetime.datetime.fromisoformat(clean_str)
+                return dt.timestamp()
+        except Exception:
+            pass
+        return time.time()
+
+    def _is_ignorable_background_host(self, host: str) -> bool:
+        """
+        判断是否为系统后台静默长轮询、推送通道或遥测连接 (如 Google FCM / Meet Signaler / Apple APNs)。
+        这些连接由客户端发起后长期挂起等待服务端下发事件，期间无下行数据属于完全正常的预期行为，
+        必须从断流与软失速检测中白名单排除，避免误判为物理黑洞。
+        """
+        if not host:
+            return True
+        h = host.lower().strip()
+        ignorable_keywords = (
+            "mtalk.google.com",
+            "signaler-pa.clients6.google.com",
+            "chat-pa.clients6.google.com",
+            "antigravity-unleash.goog",
+            "push.apple.com",
+            "pipe.aria.microsoft.com",
+            "gateway.facebook.com",
+        )
+        for kw in ignorable_keywords:
+            if kw in h:
+                return True
+        return False
+
+    def _is_external_host(self, host: str) -> bool:
+        if not host:
+            return False
+        h = host.lower().strip()
+        if h in ("localhost", "127.0.0.1", "::1"):
+            return False
+        if h.endswith(".local") or h.endswith(".internal"):
+            return False
+        if h.startswith("192.168.") or h.startswith("10.") or h.startswith("172."):
+            return False
+        if self._is_ignorable_background_host(h):
+            return False
+        return True
+
+    def _get_root_domain(self, host: str) -> str:
+        """
+        提取根域名 (Apex Domain)，将同厂不同子域名 (如 www.bing.com 与 cn.bing.com，
+        或 YouTube 的不同 googlevideo.com CDN 节点) 聚类为同一个根域名，
+        防止因访问单个网站时多个子域名并发请求误触发多域名断流判定。
+        """
+        if not host:
+            return ""
+        h = host.strip().lower()
+        if ":" in h and not h.startswith("["):
+            h = h.split(":")[0]
+
+        parts = h.split(".")
+        if len(parts) == 4 and all(p.isdigit() for p in parts):
+            return h
+
+        if len(parts) <= 2:
+            return h
+
+        second_level_tlds = {
+            "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn",
+            "co.uk", "org.uk", "me.uk",
+            "com.hk", "org.hk", "net.hk", "edu.hk",
+            "com.tw", "org.tw", "net.tw",
+            "com.jp", "co.jp", "ne.jp",
+            "com.sg", "edu.sg",
+        }
+        two_tail = f"{parts[-2]}.{parts[-1]}"
+        if two_tail in second_level_tlds and len(parts) >= 3:
+            return f"{parts[-3]}.{two_tail}"
+        return f"{parts[-2]}.{parts[-1]}"
+
+    def _loop(self):
+        while self._running:
+            try:
+                time.sleep(self.check_interval)
+                if not self.enabled:
+                    self.current_status_summary = "已暂停守护"
+                    continue
+
+                self._check_and_heal()
+            except Exception:
+                pass
+
+    def _check_and_heal(self):
+        now = time.time()
+        proxies_map = self.client.get_proxies()
+        if not proxies_map:
+            return
+
+        # 1. 抓取被监控策略组当前正在使用的物理节点
+        group_current_nodes: Dict[str, str] = {}
+        for grp in self.monitored_groups:
+            g_data = proxies_map.get(grp, {})
+            c_node = g_data.get("now", "")
+            if c_node:
+                group_current_nodes[grp] = c_node
+
+        self.current_active_node = group_current_nodes.get("⚡ 自动选择", "未知出口")
+        self.current_active_nohk_node = group_current_nodes.get("⚡ 自动选择 (非香港)", "未知非港出口")
+
+        # 2. 读取当前活跃连接快照
+        conns_data = self.client.get_connections(timeout=1.8)
+        if not conns_data or not isinstance(conns_data, dict):
+            return
+
+        connections = conns_data.get("connections", [])
+        if not connections:
+            self.current_status_summary = f"空闲就绪 (全量: {self.current_active_node} | 非港: {self.current_active_nohk_node})"
+            self._notify_status()
+            return
+
+        # 3. 分析单向发包黑洞与软失速假死，按 (所属策略组, 物理节点) 聚类统计
+        # blackhole_hosts: {(group_name, node_name): set(host1, host2, ...)}
+        blackhole_hosts: Dict[Tuple[str, str], Set[str]] = {}
+        blackhole_conn_ids: Dict[Tuple[str, str], List[str]] = {}
+        blackhole_stall_types: Dict[Tuple[str, str], Set[str]] = {}
+
+        for conn in connections:
+            chains = conn.get("chains", [])
+            if not chains:
+                continue
+
+            node_name = chains[0]
+            metadata = conn.get("metadata", {})
+            host = metadata.get("host") or metadata.get("destinationIP") or ""
+            if not self._is_external_host(host):
+                continue
+
+            upload = conn.get("upload", 0)
+            download = conn.get("download", 0)
+            start_ts = self._parse_start_time(conn.get("start", ""))
+            duration = now - start_ts
+
+            # 物理硬断流检测 (单向发包黑洞)：持续多秒有上传无下载 (upload > 0, download == 0)
+            # 只有当且仅当向外发出了请求 (如 TCP SYN / HTTP Request)，但在超时窗口内没有任何数据返回，才是真实物理断流
+            # 凡是 download > 0 的连接，说明握手和下行响应均已成功，绝大部分为空闲长连接 (Keep-Alive)，严禁误判为断流！
+            is_hard_stall = (duration >= self.blackhole_timeout and upload > 0 and download == 0)
+
+            if is_hard_stall:
+                # 定位该连接属于哪个受监控的策略组 (血统溯源)
+                matched_grp = None
+                for grp in self.monitored_groups:
+                    if grp in chains:
+                        matched_grp = grp
+                        break
+
+                # 若链条中无直接显式名称，则根据该节点当前被哪个组选用推断
+                if not matched_grp:
+                    for grp, curr_n in group_current_nodes.items():
+                        if curr_n == node_name:
+                            matched_grp = grp
+                            break
+
+                if not matched_grp:
+                    matched_grp = "⚡ 自动选择"
+
+                pair_key = (matched_grp, node_name)
+                if pair_key not in blackhole_hosts:
+                    blackhole_hosts[pair_key] = set()
+                    blackhole_conn_ids[pair_key] = []
+                    blackhole_stall_types[pair_key] = set()
+                root_domain = self._get_root_domain(host)
+                blackhole_hosts[pair_key].add(root_domain or host)
+                blackhole_conn_ids[pair_key].append(conn.get("id"))
+                blackhole_stall_types[pair_key].add("硬断流")
+
+        # 4. 逐一巡检受监控策略组中的在用节点是否集体暴毙或严重抽风 (同时预先刷新内存热备就绪池)
+        self._refresh_standby_cache(proxies_map)
+        healed_any = False
+        for grp, curr_n in group_current_nodes.items():
+            pair_key = (grp, curr_n)
+            if pair_key in blackhole_hosts:
+                distinct_hosts = blackhole_hosts[pair_key]
+                if len(distinct_hosts) >= self.min_blackhole_hosts:
+                    stall_types = blackhole_stall_types.get(pair_key, set())
+                    stall_desc = "/".join(sorted(list(stall_types))) if stall_types else "断流"
+                    hosts_preview = ", ".join(sorted(list(distinct_hosts))[:3])
+                    is_non_hk = ("非香港" in grp)
+
+                    # 触发嫌疑，发射质量哨兵微探针 (对齐客户端 1200ms HTTP 探针)
+                    probe_delay = self.client.query_proxy_delay(curr_n, self.probe_url, timeout_ms=self.probe_timeout_ms)
+
+                    # 分支 A：探针初次超时 (>= 99999ms) —— 启动防抖复测，避免因瞬时并发高吞吐丢包导致误杀！
+                    if probe_delay >= 99999:
+                        time.sleep(0.4)
+                        retry_delay = self.client.query_proxy_delay(curr_n, self.probe_url, timeout_ms=self.probe_timeout_ms)
+                        if retry_delay >= 99999:
+                            dead_reason = (
+                                f"【{grp}】并发 {len(distinct_hosts)} 个独立主域名{stall_desc}且复测探针连续超时暴毙 "
+                                f"(目标: {hosts_preview})"
+                            )
+                            self.yellow_cards.pop(curr_n, None)
+                            self._execute_auto_heal(
+                                target_group=grp,
+                                dead_node=curr_n,
+                                reason=dead_reason,
+                                dead_conn_ids=blackhole_conn_ids.get(pair_key, []),
+                                is_non_hk=is_non_hk,
+                            )
+                            healed_any = True
+                        else:
+                            self.log(f"⚠️ [探针防抖生效] 节点 【{curr_n}】 初次探测超时，但复测成功 ({retry_delay}ms)，避免误杀")
+                            probe_delay = retry_delay
+
+                    # 分支 B：探针自身也严重劣化 (>= degrade_rtt_ms 且 < 99999) —— 启动观察缓冲与双黄牌机制
+                    # 【核心法则】：若探针极速通畅 (< 280ms，如 37ms)，拥有一票否决权，绝对判定为物理健康，绝不发牌误杀！
+                    elif probe_delay >= self.degrade_rtt_ms:
+                        last_card_ts = self.yellow_cards.get(curr_n, 0.0)
+                        time_since_last_card = now - last_card_ts
+
+                        if self.strike_min_interval <= time_since_last_card <= self.strike_window:
+                            # 满足在 [10s, 60s] 观察缓冲期后二次抽风，两黄变一红！强制退位顺移
+                            dead_reason = (
+                                f"【{grp}】经观察缓冲期后二次抽风/延迟严重劣化 ({probe_delay}ms >= {self.degrade_rtt_ms}ms, {stall_desc}) "
+                                f"(目标: {hosts_preview})"
+                            )
+                            self.yellow_cards.pop(curr_n, None)
+                            self.log(f"🚨 [两黄变一红] 节点 【{curr_n}】 经 {int(time_since_last_card)}s 观察期后持续抽风劣化 ({probe_delay}ms)，出示红牌强制退位顺移！")
+                            self._execute_auto_heal(
+                                target_group=grp,
+                                dead_node=curr_n,
+                                reason=dead_reason,
+                                dead_conn_ids=blackhole_conn_ids.get(pair_key, []),
+                                is_non_hk=is_non_hk,
+                            )
+                            healed_any = True
+                        elif time_since_last_card < self.strike_min_interval:
+                            # 还在 10 秒观察缓冲期内，保持观察，绝不连出两牌
+                            self.current_status_summary = f"🟨 黄牌观察中 ({curr_n} 延迟 {probe_delay}ms)"
+                            self._notify_status()
+                        else:
+                            # 首次抽风 (或距离上次已超过 60s 重置)，出示新黄牌并开始观察期
+                            self.yellow_cards[curr_n] = now
+                            self.log(f"🟨 [自愈黄牌] 节点 【{curr_n}】 延迟飙升劣化 ({probe_delay}ms >= {self.degrade_rtt_ms}ms, {stall_desc})，出示黄牌进入观察期...")
+                            self.current_status_summary = f"🟨 黄牌警告 ({curr_n} 延迟 {probe_delay}ms) | 观察中"
+                            self._notify_status()
+                    else:
+                        # 探针通畅 (< degrade_rtt_ms，如 37ms)，一票否决证明当前节点健康！
+                        if curr_n in self.yellow_cards and (now - self.yellow_cards[curr_n]) > self.strike_window:
+                            self.yellow_cards.pop(curr_n, None)
+
+        if not healed_any:
+            active_count = len(connections)
+            yc_count = len([k for k, v in self.yellow_cards.items() if (now - v) <= self.strike_window])
+            yc_str = f" | 🟨黄牌节点: {yc_count}" if yc_count > 0 else ""
+            self.current_status_summary = (
+                f"🟢 双通道畅通 (全量: {self.current_active_node} | 非港: {self.current_active_nohk_node} | 活跃: {active_count}{yc_str})"
+            )
+            self._notify_status()
+
+    def _execute_auto_heal(
+        self,
+        target_group: str,
+        dead_node: str,
+        reason: str,
+        dead_conn_ids: List[str],
+        is_non_hk: bool = False,
+    ):
+        now = time.time()
+        if now - self.last_heal_timestamp < self.min_switch_interval:
+            self.log(f"⚠️ [自愈避震] 策略组 【{target_group}】 节点 {dead_node} 异常，但距离上次切换不足 {int(self.min_switch_interval)}s，暂缓动作")
+            return
+
+        tag_prefix = "🛡️ [非港AI自愈]" if is_non_hk else "🚨 [全量出口自愈]"
+        self.log(f"{tag_prefix} 检测到策略组 【{target_group}】 当前在用节点 【{dead_node}】 触发自愈！原因: {reason}")
+
+        # 步骤 1：挑选次优顺位备选节点 (若为非港组，绝对排除香港)
+        backup_node = self._pick_backup_node(
+            target_group=target_group,
+            exclude_node=dead_node,
+            is_non_hk=is_non_hk,
+        )
+        if not backup_node:
+            self.log(f"❌ [自愈失败] 策略组 【{target_group}】 中未找到可用的健康备选节点！")
+            return
+
+        # 步骤 2：毫秒级优雅引流 —— 0ms 瞬间把出口切换至热备节点 (所有新请求/重发秒走新路)
+        t0 = time.perf_counter()
+        switched = self.client.switch_proxy(target_group, backup_node, timeout=1.5)
+        switch_cost_ms = (time.perf_counter() - t0) * 1000
+
+        if switched:
+            # 步骤 3：坏死节点冷冻熔断 15 分钟
+            self.cooldown_nodes[dead_node] = now + self.cooldown_duration
+            self.healed_count += 1
+            self.last_heal_timestamp = now
+
+            if is_non_hk:
+                self.current_active_nohk_node = backup_node
+            else:
+                self.current_active_node = backup_node
+
+            self.last_heal_info = {
+                "group": target_group,
+                "dead_node": dead_node,
+                "backup_node": backup_node,
+                "is_non_hk": is_non_hk,
+                "cost_ms": round(switch_cost_ms, 1),
+                "evicted": len(dead_conn_ids),
+                "reason": reason,
+                "time": time.strftime("%H:%M:%S", time.localtime(now))
+            }
+
+            non_hk_tip = " (已严格继承非港限制，Gemini/反重力保持畅通)" if is_non_hk else ""
+            log_msg = f"✨ [优雅引流完成] 策略组 【{target_group}】 耗时 {switch_cost_ms:.1f}ms 顺移至备选节点 【{backup_node}】！{non_hk_tip}"
+            self.log(log_msg)
+
+            # 步骤 4：异步平滑清退 —— 仅定点清理真正坏死的僵尸连接，绝不滥杀活跃的正常数据流！
+            def _delayed_drain():
+                time.sleep(0.5)
+                evicted_count = 0
+                for cid in dead_conn_ids:
+                    if cid and self.client.close_connection(cid, timeout=0.5):
+                        evicted_count += 1
+                if evicted_count > 0:
+                    self.log(f"🔪 [定点扫尾] 已精准清理旧节点 【{dead_node}】 遗留的 {evicted_count} 条死锁僵尸连接")
+
+            threading.Thread(target=_delayed_drain, daemon=True, name="HealDrainThread").start()
+
+            self.current_status_summary = f"⚡ 刚刚自愈: 【{target_group}】已顺移至 {backup_node}"
+
+            if callable(self.on_heal_event):
+                try:
+                    self.on_heal_event(dead_node, backup_node, self.last_heal_info)
+                except Exception:
+                    pass
+        else:
+            self.log(f"❌ [自愈切换失败] 向策略组 【{target_group}】 推送目标节点失败！")
+
+        self._notify_status()
+
+    def _refresh_standby_cache(self, proxies_map: dict):
+        """
+        在后台心跳中预先计算并缓存各策略组的顺位热备节点 (Pre-warmed Standby)，
+        发生断流瞬间 0 延迟直接取用，无需临时排序与过滤。
+        """
+        now = time.time()
+        for grp in self.monitored_groups:
+            is_non_hk = ("非香港" in grp)
+            candidates: List[str] = []
+            if callable(self.get_candidates_fn):
+                try:
+                    candidates = self.get_candidates_fn(is_non_hk=is_non_hk) or []
+                except TypeError:
+                    candidates = self.get_candidates_fn() or []
+            if not candidates:
+                candidates = list(proxies_map.get(grp, {}).get("all", []))
+            if is_non_hk:
+                candidates = [c for c in candidates if c and not EXCLUDE_HK_REGEX.search(c)]
+            # 过滤掉当前处于 15 分钟熔断期的节点
+            ready_cands = [c for c in candidates if c and (c not in self.cooldown_nodes or self.cooldown_nodes[c] <= now)]
+            self.standby_cache[grp] = ready_cands
+
+    def _pick_backup_node(
+        self,
+        target_group: str,
+        exclude_node: str,
+        is_non_hk: bool = False,
+    ) -> Optional[str]:
+        # 1. 优先直接从内存热备队列中瞬时取出首个非死节点 (0 毫秒开销)
+        cached = self.standby_cache.get(target_group, [])
+        for cand in cached:
+            if cand and cand != exclude_node:
+                return cand
+
+        # 2. 若热备缓存恰好为空，回退执行全量提取
+        candidates: List[str] = []
+        if callable(self.get_candidates_fn):
+            try:
+                candidates = self.get_candidates_fn(is_non_hk=is_non_hk) or []
+            except TypeError:
+                candidates = self.get_candidates_fn() or []
+
+        if not candidates:
+            proxies_map = self.client.get_proxies()
+            candidates = list(proxies_map.get(target_group, {}).get("all", []))
+
+        if is_non_hk:
+            candidates = [c for c in candidates if c and not EXCLUDE_HK_REGEX.search(c)]
+
+        now = time.time()
+        for cand in candidates:
+            if not cand or cand == exclude_node:
+                continue
+            if cand in self.cooldown_nodes and self.cooldown_nodes[cand] > now:
+                continue
+            return cand
+
+        # 若都在冷却期，选择任一不同的健康候选兜底
+        for cand in candidates:
+            if cand and cand != exclude_node:
+                return cand
+        return None
+
+    def _notify_status(self):
+        if callable(self.on_status_update):
+            try:
+                self.on_status_update(self.get_status_dict())
+            except Exception:
+                pass
+
+    def diagnose_current_link(self) -> dict:
+        """
+        一键手动双通道链路深度诊断
+        """
+        proxies_map = self.client.get_proxies()
+        auto_now = proxies_map.get("⚡ 自动选择", {}).get("now", "")
+        nohk_now = proxies_map.get("⚡ 自动选择 (非香港)", {}).get("now", "")
+
+        delay_auto = self.client.query_proxy_delay(auto_now, self.probe_url, timeout_ms=1500) if auto_now else 99999
+        delay_nohk = self.client.query_proxy_delay(nohk_now, self.probe_url, timeout_ms=1500) if nohk_now else 99999
+
+        conns_data = self.client.get_connections(timeout=2.0)
+        total_conns = len(conns_data.get("connections", []))
+
+        is_healthy = (delay_auto < 99999 and delay_nohk < 99999)
+        return {
+            "active_node": auto_now or "未获取到",
+            "active_nohk_node": nohk_now or "未获取到",
+            "delay_ms": delay_auto if delay_auto < 99999 else "超时(断流)",
+            "delay_nohk_ms": delay_nohk if delay_nohk < 99999 else "超时(断流)",
+            "is_healthy": is_healthy,
+            "total_connections": total_conns,
+            "healed_count": self.healed_count,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+```
+
+## File: `services/c_segment_miner.py`
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+import time
+
+from services.probe_service import get_c_segment_ips, get_cf_colo_raw, tcp_ping
+
+
+def scan_c_segment(
+    seed_ip,
+    port=443,
+    ping_timeout=1.2,
+    colo_timeout=1.5,
+    max_workers=25,
+    on_ip_tested=None,
+    cancel_check=None,
+):
+    """
+    针对输入 IP 所在的 /24 C段网段开展并发探测扫描
+    返回: list[dict] -> [{"ip": ip, "delay": rtt, "colo_code": c_code, "colo_disp": c_disp}, ...]
+    """
+    c_ips = get_c_segment_ips(seed_ip)
+    if not c_ips:
+        return []
+
+    results = []
+
+    def _scan_single(target_ip):
+        if cancel_check and cancel_check():
+            return None
+
+        rtt = tcp_ping(target_ip, port=port, timeout=ping_timeout)
+        if rtt >= 99999:
+            if on_ip_tested:
+                on_ip_tested(target_ip, 99999, "-", "-")
+            return None
+
+        c_code, c_disp = get_cf_colo_raw(target_ip, port=port, timeout=colo_timeout)
+        res = {
+            "ip": target_ip,
+            "port": port,
+            "delay": rtt,
+            "colo_code": c_code,
+            "colo_disp": c_disp,
+        }
+        if on_ip_tested:
+            on_ip_tested(target_ip, rtt, c_code, c_disp)
+        return res
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for item in executor.map(_scan_single, c_ips):
+            if item:
+                results.append(item)
+
+    # 按延迟从小到大排序
+    results.sort(key=lambda x: x["delay"])
+    return results
 ```
 
 ## File: `services/clash_client.py`
 
 ```python
-import requests
-from requests.exceptions import RequestException, Timeout
+import copy
+import glob
+import json
+import os
+import re
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import yaml
+
+from config.settings import BASE_DIR, PARENT_DIR, THEME
+from utils.win32_utils import trigger_verge_reactivate_hotkey, is_run_as_admin
+
 
 class ClashClient:
-    def __init__(self, base_url="http://127.0.0.1:9090"):
-        self.base_url = base_url
-        self.session = requests.Session()
-        self.timeout = 5.0
+    """
+    Clash / Clash Verge REST API 客户端：
+    封装与内核 external-controller 的 HTTP 通信、延迟检测、模式切换与装载探测。
+    """
 
-    def safe_request(self, method, endpoint, retries=3, **kwargs):
-        url = f"{self.base_url}{endpoint}"
-        kwargs.setdefault('timeout', self.timeout)
-        
-        for attempt in range(retries):
+    def __init__(self, host="127.0.0.1", port=9097, secret="", base_url=None):
+        if base_url:
+            parsed = urllib.parse.urlparse(base_url)
+            self.host = parsed.hostname or host
+            self.port = parsed.port or port
+        else:
+            self.host = host
+            self.port = int(port)
+        self.secret = str(secret).strip()
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    @property
+    def base_url(self):
+        return f"http://{self.host}:{self.port}"
+
+    def update_credentials(self, port=None, secret=None):
+        if port is not None:
             try:
-                response = self.session.request(method, url, **kwargs)
-                response.raise_for_status()
-                return response.json() if response.content else {}
-            except Timeout:
-                print(f"请求 Clash 核心超时 ({attempt + 1}/{retries}): {url}")
-            except RequestException as e:
-                print(f"请求 Clash 核心网络异常 ({attempt + 1}/{retries}): {e}")
-            
-            time.sleep(1.0 * (attempt + 1))
-        
-        # 返回空回退字典，防止最外层抛错导致主线程断崖崩溃
-        print(f"Clash 请求彻底失败，启动回退机制保护主线程: {url}")
-        return {}
+                self.port = int(port)
+            except (ValueError, TypeError):
+                pass
+        if secret is not None:
+            self.secret = str(secret).strip()
+
+    @staticmethod
+    def auto_detect_credentials():
+        """
+        从 clash-verge.yaml 中自动检测并提取 external-controller 端口与 secret
+        """
+        port = 9097
+        secret = ""
+        clash_yaml = os.path.join(PARENT_DIR, "clash-verge.yaml")
+        if os.path.exists(clash_yaml):
+            try:
+                with open(clash_yaml, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        line_s = line.strip()
+                        if line_s.startswith("external-controller:"):
+                            m = re.search(r":(\d+)", line_s)
+                            if m:
+                                port = int(m.group(1))
+                        elif line_s.startswith("secret:"):
+                            m = re.search(r"secret:\s*['\"]?([^'\"\r\n]*)['\"]?", line_s)
+                            if m and m.group(1).strip():
+                                secret = m.group(1).strip()
+            except Exception:
+                pass
+        return port, secret
+
+    def call_api(self, endpoint, timeout=2.5, method="GET", data=None):
+        url = f"http://{self.host}:{self.port}{endpoint}"
+        req_data = data
+        if isinstance(data, dict):
+            req_data = json.dumps(data).encode("utf-8")
+        elif isinstance(data, str):
+            req_data = data.encode("utf-8")
+
+        req = urllib.request.Request(url, data=req_data, method=method)
+        if self.secret:
+            req.add_header("Authorization", f"Bearer {self.secret}")
+        if req_data:
+            req.add_header("Content-Type", "application/json")
+
+        try:
+            with self.opener.open(req, timeout=timeout) as resp:
+                res = resp.read()
+                return json.loads(res.decode("utf-8")) if res else {}
+        except Exception:
+            return None
+
+    def test_connection(self):
+        """
+        测试与内核的连接连通性
+        返回: (is_connected: bool, version_info: str)
+        """
+        data = self.call_api("/version", timeout=1.5)
+        if data and isinstance(data, dict) and "version" in data:
+            return True, data.get("version", "")
+        return False, ""
+
+    def get_configs(self):
+        return self.call_api("/configs", timeout=2.0) or {}
+
+    def patch_configs(self, patch_dict):
+        res = self.call_api("/configs", method="PATCH", data=patch_dict, timeout=2.0)
+        return res is not None
+
+    def get_mixed_port(self, default=7897):
+        configs = self.get_configs()
+        if configs:
+            m_port = configs.get("mixed-port", 0)
+            if m_port and int(m_port) > 0:
+                return int(m_port)
+            port = configs.get("port", 0)
+            if port and int(port) > 0:
+                return int(port)
+        return default
 
     def get_proxies(self):
-        return self.safe_request("GET", "/proxies")
+        data = self.call_api("/proxies", timeout=3.0)
+        return data.get("proxies", {}) if (data and isinstance(data, dict)) else {}
 
-    def switch_proxy(self, selector_name, proxy_name):
-        payload = {"name": proxy_name}
-        return self.safe_request("PUT", f"/proxies/{selector_name}", json=payload)
+    def query_proxy_delay(self, proxy_name, test_url, timeout_ms=1500):
+        enc_name = urllib.parse.quote(proxy_name, safe="")
+        enc_url = urllib.parse.quote(test_url, safe="")
+        endpoint = f"/proxies/{enc_name}/delay?timeout={timeout_ms}&url={enc_url}"
+        res = self.call_api(endpoint, timeout=(timeout_ms / 1000.0) + 0.6)
+        if res and isinstance(res, dict) and "delay" in res:
+            return res["delay"]
+        return 99999
+
+    def get_connections(self, timeout=2.0) -> dict:
+        """
+        获取当前内核所有活跃 TCP / UDP 连接快照
+        """
+        data = self.call_api("/connections", timeout=timeout)
+        return data if (data and isinstance(data, dict)) else {}
+
+    def close_connection(self, conn_id: str, timeout=1.0) -> bool:
+        """
+        关闭指定连接，内核将向客户端发送 TCP RST 以迫使其瞬时重连
+        """
+        if not conn_id:
+            return False
+        res = self.call_api(f"/connections/{conn_id}", method="DELETE", timeout=timeout)
+        return res is not None
+
+    def close_connections_by_proxy(self, proxy_name: str, timeout=2.0) -> int:
+        """
+        外科手术式批量切断途径指定物理代理节点的所有僵尸连接
+        """
+        if not proxy_name:
+            return 0
+        conns_data = self.get_connections(timeout=timeout)
+        conns = conns_data.get("connections", [])
+        closed_count = 0
+        for conn in conns:
+            chains = conn.get("chains", [])
+            # chains 格式如: ["香港 HKG 24.62 MB/s", "⚡ 自动选择", "🚀 节点选择"]
+            if proxy_name in chains or (chains and chains[0] == proxy_name):
+                cid = conn.get("id")
+                if cid and self.close_connection(cid, timeout=0.8):
+                    closed_count += 1
+        return closed_count
+
+    def switch_proxy(self, group_name: str, target_proxy_name: str, timeout=2.0) -> bool:
+        """
+        向策略组（Selector 或 URLTest）发送 PUT 请求，毫秒级内存热切换出口节点
+        """
+        if not group_name or not target_proxy_name:
+            return False
+        enc_group = urllib.parse.quote(group_name, safe="")
+        res = self.call_api(f"/proxies/{enc_group}", method="PUT", data={"name": target_proxy_name}, timeout=timeout)
+        return res is not None
+
+    def wait_for_kernel_reload(self, target_nodes, max_wait_sec=15):
+        if not target_nodes:
+            return True, "无节点需要装载"
+
+        probe_sample = target_nodes[:30]
+        start_t = time.time()
+        retried_hotkey = False
+        last_stat = "无数据"
+
+        while time.time() - start_t < max_wait_sec:
+            time.sleep(0.8)
+            all_proxies_map = self.get_proxies()
+            if not all_proxies_map:
+                continue
+
+            core_proxies = set(all_proxies_map.keys())
+            auto_group = all_proxies_map.get("⚡ 自动选择", {})
+            auto_members = set(auto_group.get("all", []))
+            matched_in_auto = sum(1 for n in probe_sample if n in auto_members)
+            matched = sum(1 for n in probe_sample if n in core_proxies)
+            match_rate = matched / len(probe_sample)
+            last_stat = f"内核节点数: {len(core_proxies)}，自动选择成员数: {len(auto_members)}"
+
+            if matched_in_auto > 0 or match_rate >= 0.7:
+                return True, f"内核装载成功，【⚡ 自动选择】策略组已包含 {len(auto_members)} 个优质节点"
+
+            if time.time() - start_t > 3.5 and not retried_hotkey:
+                trigger_verge_reactivate_hotkey()
+                retried_hotkey = True
+
+        admin_tip = "" if is_run_as_admin() else "【提示：当前以普通权限运行，已由内核API直连完成热同步】"
+        sample_preview = probe_sample[:2]
+        return False, f"超时未检测到装载。最新状态: {last_stat}。文件前2个节点: {sample_preview} {admin_tip}"
+
+
+class ClashModeGuard:
+    """
+    Clash 运行模式安全熔断保护上下文管理器 (RAII 机制)：
+    进入时：自动保存原分流模式 (如 rule)，无缝临时切换为指定模式 (如 global 用于精测测速)
+    退出时：无论正常完成、发生异常中断还是用户强制取消，保证 100% 自动恢复原分流模式，杜绝网络瘫痪！
+    """
+
+    def __init__(self, client: ClashClient, temporary_mode="global"):
+        self.client = client
+        self.temporary_mode = temporary_mode
+        self.original_mode = "rule"
+
+    def __enter__(self):
+        try:
+            configs = self.client.get_configs()
+            self.original_mode = configs.get("mode", "rule")
+            if self.original_mode != self.temporary_mode:
+                self.client.patch_configs({"mode": self.temporary_mode})
+        except Exception:
+            pass
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            self.client.patch_configs({"mode": self.original_mode})
+        except Exception:
+            pass
+        return False
+
+
+def find_cf_donor_node(yaml_filepath=None, active_profile=None, verified_nodes=None):
+    """
+    从订阅配置或验证池中寻找 1 个可用的 Cloudflare 协议母体
+    要求包含 uuid/password、tls=True 及 valid host/sni
+    """
+    # 1. 尝试从 verified_nodes 中查找
+    if verified_nodes and isinstance(verified_nodes, dict):
+        for k, v in verified_nodes.items():
+            if isinstance(v, dict):
+                node_data = v.get("node_data") or v.get("detail")
+                if isinstance(node_data, dict):
+                    has_cred = bool(node_data.get("uuid") or node_data.get("password"))
+                    tls = bool(node_data.get("tls", False))
+                    sni = (
+                        node_data.get("servername")
+                        or node_data.get("sni")
+                        or (node_data.get("ws-opts", {}).get("headers", {}).get("Host") if isinstance(node_data.get("ws-opts"), dict) else None)
+                    )
+                    if has_cred and tls and sni:
+                        return copy.deepcopy(node_data)
+
+    # 2. 从当前/指定的 YAML 订阅文件中查找
+    paths = []
+    if yaml_filepath and os.path.exists(yaml_filepath):
+        paths.append(yaml_filepath)
+    if active_profile:
+        p = os.path.join(BASE_DIR, active_profile) if not os.path.isabs(active_profile) else active_profile
+        if os.path.exists(p) and p not in paths:
+            paths.append(p)
+    # 检索 BASE_DIR 下的所有 yaml 文件
+    for yf in glob.glob(os.path.join(BASE_DIR, "*.yaml")):
+        if yf not in paths:
+            paths.append(yf)
+
+    cf_protocols = {"vless", "vmess", "trojan"}
+    for ypath in paths:
+        try:
+            with open(ypath, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line_s = line.strip()
+                    if line_s.startswith("- {") and any(proto in line_s for proto in cf_protocols):
+                        try:
+                            node = yaml.safe_load(line_s[2:])
+                            if isinstance(node, dict):
+                                n_type = str(node.get("type", "")).lower()
+                                if n_type in cf_protocols:
+                                    has_cred = bool(node.get("uuid") or node.get("password"))
+                                    tls = bool(node.get("tls", False))
+                                    sni = (
+                                        node.get("servername")
+                                        or node.get("sni")
+                                        or (node.get("ws-opts", {}).get("headers", {}).get("Host") if isinstance(node.get("ws-opts"), dict) else None)
+                                    )
+                                    if has_cred and tls and sni:
+                                        return node
+                        except Exception:
+                            continue
+        except Exception:
+            continue
+
+    return None
+
+
+def fission_clean_ips(donor_node: dict, clean_endpoints: list) -> list:
+    """
+    批量换头裂变：提取母体协议参数（uuid、path、sni、tls 等），
+    对纯净 Clean IP 端点批量克隆，替换 server 与 port，构建合法 Proxies 临时列表。
+    """
+    if not donor_node or not clean_endpoints:
+        return []
+
+    fissioned = []
+    seen = set()
+    for ep in clean_endpoints:
+        if not ep or ep in seen:
+            continue
+        seen.add(ep)
+
+        host = ep
+        port = 443
+        if ":" in host:
+            parts = host.split(":", 1)
+            host = parts[0].strip()
+            if parts[1].strip().isdigit():
+                port = int(parts[1].strip())
+
+        clone = copy.deepcopy(donor_node)
+        clone["name"] = f"⚡_graft_{ep}"
+        clone["server"] = host
+        clone["port"] = port
+
+        # 智能匹配端口协议 TLS 属性
+        if port in [80, 8080, 8880, 2052, 2082, 2086]:
+            clone["tls"] = False
+        elif port in [443, 8443, 2053, 2083, 2087, 2096]:
+            clone["tls"] = True
+
+        fissioned.append(clone)
+
+    return fissioned
 ```
 
 ## File: `services/colo_service.py`
@@ -11150,12 +12900,42 @@ from services.probe_service import detect_node_region
 def get_colo_region(code):
     """
     获取 Colo 代码或国家二字码对应的宏观大区 (如 Asia_KR, Asia_JP, Asia_HK, NA, EU 等)
+    全面兼容复合机房展示字符串（如 "东京 NRT"、"韩国 KR (SK)"、"首尔 ICN"、"日本 JP (Choopa)" 等）
     """
     if not code or code == "-":
         return "OTHER"
-    code_upper = code.strip().upper()
+    code_str = str(code).strip()
+    code_upper = code_str.upper()
     if code_upper in COLO_REGIONS:
         return COLO_REGIONS[code_upper]
+
+    # 1. 优先从字符串中提取二至四位大写代号匹配 (如 NRT, ICN, SIN, SJC, FRA 等)
+    tokens = re.findall(r"[A-Z]{2,4}", code_upper)
+    for tok in tokens:
+        if tok in COLO_REGIONS:
+            return COLO_REGIONS[tok]
+
+    # 2. 中文地名语义映射兜底
+    CN_REGION_MAP = [
+        ("日本", "Asia_JP"), ("东京", "Asia_JP"), ("大阪", "Asia_JP"), ("名古屋", "Asia_JP"), ("福冈", "Asia_JP"),
+        ("韩国", "Asia_KR"), ("首尔", "Asia_KR"), ("仁川", "Asia_KR"), ("釜山", "Asia_KR"),
+        ("香港", "Asia_HK"), ("澳门", "Asia_HK"),
+        ("台湾", "Asia_TW"), ("台北", "Asia_TW"), ("高雄", "Asia_TW"),
+        ("新加坡", "Asia_SG"), ("狮城", "Asia_SG"),
+        ("马来西亚", "Asia_MY"), ("吉隆坡", "Asia_MY"),
+        ("泰国", "Asia_TH"), ("曼谷", "Asia_TH"),
+        ("越南", "Asia_VN"), ("河内", "Asia_VN"), ("胡志明", "Asia_VN"),
+        ("印度", "Asia_IN"), ("孟买", "Asia_IN"), ("德里", "Asia_IN"),
+        ("美国", "NA"), ("美区", "NA"), ("洛杉矶", "NA"), ("圣何塞", "NA"), ("旧金山", "NA"),
+        ("西雅图", "NA"), ("芝加哥", "NA"), ("纽约", "NA"), ("加拿大", "NA"),
+        ("德国", "EU"), ("法兰克福", "EU"), ("英国", "EU"), ("伦敦", "EU"), ("法国", "EU"), ("巴黎", "EU"),
+        ("荷兰", "EU"), ("阿姆斯特丹", "EU"), ("俄罗斯", "EU"),
+        ("澳大利亚", "OC"), ("悉尼", "OC"), ("墨尔本", "OC"),
+    ]
+    for kw, reg in CN_REGION_MAP:
+        if kw in code_str:
+            return reg
+
     return "OTHER"
 
 
@@ -11291,13 +13071,19 @@ def is_node_hongkong(node_name):
 def is_asian_node(node_name, colo=None):
     """
     判断节点是否为亚洲节点（严格排除美区、欧洲、大洋洲、非洲等）
+    实测物理机房 (Colo) 拥有最高真理层级 (Ground Truth)：
+    - 若实测为亚洲机房 (Asia_*)，绝对判定为亚洲 (True)，物理数据最高，豁免一切文本关键词误判！
+    - 若实测为非亚洲机房 (NA, EU, OC, SA, AF)，绝对判定为非亚洲 (False)！
+    - 仅在未知 Colo 或 OTHER 时，退回文本关键词与国家码严谨排查。
     """
     if not node_name:
         return False
 
-    # 若已知 Colo 且 Colo 在非亚洲列表中，直接判定为非亚洲
+    # 0. 物理机房实测最高真理原则
     if colo and colo != "-":
         reg = get_colo_region(colo)
+        if reg.startswith("Asia_"):
+            return True
         if reg in ["NA", "EU", "OC", "SA", "AF"]:
             return False
 
@@ -11326,66 +13112,6 @@ def is_asian_node(node_name, colo=None):
 
     # 兜底：若节点名称不含明显非亚洲标志，默认保留
     return True
-```
-
-## File: `services/c_segment_miner.py`
-
-```python
-from concurrent.futures import ThreadPoolExecutor
-import time
-
-from services.probe_service import get_c_segment_ips, get_cf_colo_raw, tcp_ping
-
-
-def scan_c_segment(
-    seed_ip,
-    port=443,
-    ping_timeout=1.2,
-    colo_timeout=1.5,
-    max_workers=25,
-    on_ip_tested=None,
-    cancel_check=None,
-):
-    """
-    针对输入 IP 所在的 /24 C段网段开展并发探测扫描
-    返回: list[dict] -> [{"ip": ip, "delay": rtt, "colo_code": c_code, "colo_disp": c_disp}, ...]
-    """
-    c_ips = get_c_segment_ips(seed_ip)
-    if not c_ips:
-        return []
-
-    results = []
-
-    def _scan_single(target_ip):
-        if cancel_check and cancel_check():
-            return None
-
-        rtt = tcp_ping(target_ip, port=port, timeout=ping_timeout)
-        if rtt >= 99999:
-            if on_ip_tested:
-                on_ip_tested(target_ip, 99999, "-", "-")
-            return None
-
-        c_code, c_disp = get_cf_colo_raw(target_ip, port=port, timeout=colo_timeout)
-        res = {
-            "ip": target_ip,
-            "port": port,
-            "delay": rtt,
-            "colo_code": c_code,
-            "colo_disp": c_disp,
-        }
-        if on_ip_tested:
-            on_ip_tested(target_ip, rtt, c_code, c_disp)
-        return res
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for item in executor.map(_scan_single, c_ips):
-            if item:
-                results.append(item)
-
-    # 按延迟从小到大排序
-    results.sort(key=lambda x: x["delay"])
-    return results
 ```
 
 ## File: `services/filter_service.py`
@@ -11498,20 +13224,61 @@ def check_node_jitter_blacklisted(
     return False, min_d, up_jitter
 
 
-def auto_filter_and_blacklist_non_asia_nodes(all_nodes, local_blacklist, favorites, blacklist_reasons, get_node_endpoint_fn, is_asian_node_fn):
+def auto_filter_and_blacklist_non_asia_nodes(
+    all_nodes,
+    local_blacklist,
+    favorites,
+    blacklist_reasons,
+    get_node_endpoint_fn,
+    is_asian_node_fn,
+    node_colo_dict=None,
+):
     """
-    执行非亚洲节点全量排查与自动拉黑：
+    执行非亚洲节点全量排查与自动拉黑，并对历史误伤节点执行智能自愈：
+    1. 自愈扫描：对 local_blacklist 中因“非亚洲”原因被拉黑的节点重新审计，若新规则或实测物理Colo确认为亚洲节点，自动从黑名单中移出释放！
+    2. 增量排查：基于物理机房最高真理原则与净化词库排查待测池。
     返回: (filtered_count: int, blacklisted_names: list[str])
     """
+    def _lookup_colo(key):
+        if not node_colo_dict or not key:
+            return None
+        c = node_colo_dict.get(key)
+        if not c or c == "-":
+            ep = get_node_endpoint_fn(key) if get_node_endpoint_fn else None
+            if ep:
+                c = node_colo_dict.get(ep)
+        return c if (c and c != "-") else None
+
+    def _eval_is_asian(name):
+        c = _lookup_colo(name)
+        try:
+            return is_asian_node_fn(name, colo=c)
+        except TypeError:
+            return is_asian_node_fn(name)
+
+    # 0. 智能自愈：自动释放曾因 "非亚洲" 被误杀的合法亚洲节点
+    for bl_node in list(local_blacklist):
+        reason = blacklist_reasons.get(bl_node, "")
+        if "非亚洲" in reason:
+            if _eval_is_asian(bl_node):
+                local_blacklist.discard(bl_node)
+                blacklist_reasons.pop(bl_node, None)
+                if get_node_endpoint_fn:
+                    ep = get_node_endpoint_fn(bl_node)
+                    if ep:
+                        local_blacklist.discard(ep)
+                        blacklist_reasons.pop(ep, None)
+
+    # 1. 增量排查与拉黑
     newly_blacklisted = []
     for n in all_nodes:
-        if not is_asian_node_fn(n):
+        if not _eval_is_asian(n):
             if n not in local_blacklist:
                 local_blacklist.add(n)
                 favorites.discard(n)
                 reason = "非亚洲节点 (自动过滤)"
                 blacklist_reasons[n] = reason
-                ep = get_node_endpoint_fn(n)
+                ep = get_node_endpoint_fn(n) if get_node_endpoint_fn else None
                 if ep:
                     local_blacklist.add(ep)
                     blacklist_reasons[ep] = reason
@@ -11522,8 +13289,239 @@ def auto_filter_and_blacklist_non_asia_nodes(all_nodes, local_blacklist, favorit
 ## File: `services/pool_service.py`
 
 ```python
-import threading
 import copy
+import re
+import threading
+import time
+
+
+def get_pool_endpoint_sets(favorites, local_blacklist, speed_blacklist, auto_endpoints, verified_nodes, stars_nodes, get_node_endpoint_fn):
+    """
+    全系统统一的物理端点集合生成器：
+    返回: (fav_eps, bl_eps, sbl_eps, star_eps)
+    """
+    fav_eps = set()
+    for f in favorites:
+        if f:
+            ep = get_node_endpoint_fn(f)
+            if ep and ep != "127.0.0.1:443":
+                fav_eps.add(ep)
+    for a in auto_endpoints:
+        if a:
+            ep = get_node_endpoint_fn(a)
+            if ep and ep != "127.0.0.1:443":
+                fav_eps.add(ep)
+    for v in verified_nodes.values():
+        ep_v = v.get("endpoint", "")
+        if ep_v and ep_v != "127.0.0.1:443":
+            fav_eps.add(ep_v)
+
+    bl_eps = set()
+    for b in local_blacklist:
+        if not b or b.startswith("http"):
+            continue
+        ep = get_node_endpoint_fn(b)
+        if ep and ep != "127.0.0.1:443":
+            bl_eps.add(ep)
+
+    sbl_eps = set()
+    for s in speed_blacklist:
+        if not s or s.startswith("http"):
+            continue
+        ep = get_node_endpoint_fn(s)
+        if ep and ep != "127.0.0.1:443":
+            sbl_eps.add(ep)
+
+    star_eps = {
+        st.get("endpoint", "") for st in stars_nodes
+        if isinstance(st, dict) and st.get("endpoint")
+    }
+
+    return fav_eps, bl_eps, sbl_eps, star_eps
+
+
+def deduplicate_favorites_by_endpoint(favorites, all_nodes, node_details, get_node_endpoint_fn, choose_canonical_node_name_fn):
+    """
+    物理端点 1:1 严格唯一归一化合并：
+    对 favorites 中共享相同 IP:Port 的冗余马甲节点进行智能聚合，只保留最高权重代表。
+    返回: (deduped_favorites: set, merged_count: int)
+    """
+    ep_map = {}
+    non_ep_nodes = []
+
+    for n in list(favorites):
+        ep = get_node_endpoint_fn(n)
+        if ep:
+            ep_map.setdefault(ep, []).append(n)
+        else:
+            non_ep_nodes.append(n)
+
+    new_favs = set(non_ep_nodes)
+    merged_count = 0
+
+    for ep, name_list in ep_map.items():
+        if len(name_list) > 1:
+            merged_count += len(name_list) - 1
+            canonical = choose_canonical_node_name_fn(name_list)
+            new_favs.add(canonical)
+        elif name_list:
+            new_favs.add(name_list[0])
+
+    favorites.clear()
+    favorites.update(new_favs)
+    return favorites, merged_count
+
+
+def align_favorites_with_current_subscription(favorites, all_nodes, resolve_node_to_current_fn):
+    """
+    智能将历史精选池中因订阅更名（如测速后缀变化）的节点映射迁移到当前订阅中真实存在的节点名称。
+    返回: (migrated_count: int)
+    """
+    if not all_nodes or not favorites:
+        return 0
+
+    migrated_count = 0
+    updated_favs = set()
+
+    for fav in list(favorites):
+        if fav in all_nodes:
+            updated_favs.add(fav)
+        else:
+            resolved = resolve_node_to_current_fn(fav)
+            if resolved and resolved in all_nodes:
+                updated_favs.add(resolved)
+                migrated_count += 1
+            else:
+                updated_favs.add(fav)
+
+    favorites.clear()
+    favorites.update(updated_favs)
+    return migrated_count
+
+
+def clean_offline_favorites(favorites, all_nodes, local_blacklist, speed_blacklist, get_node_endpoint_fn):
+    """
+    精选池健康度审计：
+    清除已被拉黑的节点。
+    返回: (purged_count: int)
+    """
+    purged_count = 0
+    for n in list(favorites):
+        ep = get_node_endpoint_fn(n)
+        if n in local_blacklist or n in speed_blacklist or (ep and (ep in local_blacklist or ep in speed_blacklist)):
+            favorites.discard(n)
+            purged_count += 1
+    return purged_count
+
+
+def process_verified_lifecycle(verified_nodes, current_favs, stars_nodes, incubate_hours=24, incubate_passes=5):
+    """
+    处理 7 天沉淀池的生命周期状态流转。
+    确保写入 verified_nodes[ep] 时，键与 item["endpoint"] 必须为规范的纯 IP:Port 字符串，
+    严禁将原机场主的长字符串直接作为键，彻底杜绝表格第一列错位显示原名的问题。
+    """
+    now = time.time()
+
+    # 1. 深度清洗历史遗留的不规范脏键，杜绝机场名作为 Key
+    for k in list(verified_nodes.keys()):
+        clean_k = str(k).strip()
+        if "#" in clean_k:
+            clean_k = clean_k.split("#")[0].strip()
+        pure_ep = None
+        if re.match(r"^[\w\.\-]+\:\d+$", clean_k):
+            pure_ep = clean_k
+        else:
+            m = re.search(r"(\d{1,3}(?:\.\d{1,3}){3}:\d{1,5})", clean_k)
+            if m:
+                pure_ep = m.group(1)
+
+        if pure_ep:
+            if pure_ep != k:
+                val = verified_nodes.pop(k)
+                val["endpoint"] = pure_ep
+                if pure_ep not in verified_nodes:
+                    verified_nodes[pure_ep] = val
+            else:
+                verified_nodes[k]["endpoint"] = pure_ep
+        else:
+            verified_nodes.pop(k, None)
+
+    # 2. 规范化登记与考核达标存活端点
+    for fav in current_favs:
+        if not fav:
+            continue
+        clean_str = str(fav).strip()
+        if "#" in clean_str:
+            clean_str = clean_str.split("#")[0].strip()
+
+        ep = None
+        if re.match(r"^[\w\.\-]+\:\d+$", clean_str):
+            ep = clean_str
+        else:
+            m = re.search(r"(\d{1,3}(?:\.\d{1,3}){3}:\d{1,5})", clean_str)
+            if m:
+                ep = m.group(1)
+
+        if not ep or ep == "127.0.0.1:443":
+            continue
+
+        if ep not in verified_nodes:
+            verified_nodes[ep] = {
+                "endpoint": ep,
+                "first_seen": now,
+                "last_seen": now,
+                "pass_count": 1,
+                "passes": 1,
+                "fails": 0,
+                "status": "incubating",
+            }
+        else:
+            v = verified_nodes[ep]
+            v["endpoint"] = ep
+            v["last_seen"] = now
+            cur_passes = v.get("passes", v.get("pass_count", 0)) + 1
+            v["passes"] = cur_passes
+            v["pass_count"] = cur_passes
+            hours_alive = (now - v.get("first_seen", now)) / 3600.0
+            if hours_alive >= incubate_hours and cur_passes >= incubate_passes:
+                v["status"] = "verified"
+
+
+def purge_invalid_and_blacklisted_from_all_pools(favorites, verified_nodes, stars_nodes, local_blacklist, speed_blacklist, get_node_endpoint_fn):
+    """
+    全域清洗过滤：从优质精选池、沉淀孵化池、典藏常青池中彻底清除落入延迟/低速黑名单的节点。
+    返回: (purged_favs: int, purged_verified: int, purged_stars: int)
+    """
+    p_favs = 0
+    p_ver = 0
+    p_star = 0
+
+    all_bl = local_blacklist | speed_blacklist
+
+    for f in list(favorites):
+        ep = get_node_endpoint_fn(f)
+        if f in all_bl or (ep and ep in all_bl):
+            favorites.discard(f)
+            p_favs += 1
+
+    for k in list(verified_nodes.keys()):
+        ep = verified_nodes[k].get("endpoint", "")
+        if k in all_bl or (ep and ep in all_bl):
+            del verified_nodes[k]
+            p_ver += 1
+
+    initial_stars_len = len(stars_nodes)
+    stars_nodes[:] = [
+        item for item in stars_nodes
+        if not (
+            item.get("matched_name", "") in all_bl
+            or item.get("endpoint", "") in all_bl
+        )
+    ]
+    p_star = initial_stars_len - len(stars_nodes)
+
+    return p_favs, p_ver, p_star
+
 
 class PoolService:
     """
@@ -11541,10 +13539,7 @@ class PoolService:
             return cls._instance
 
     def _init_service(self):
-        # 全局池操作互斥锁，允许重入
         self._pool_lock = threading.RLock()
-        
-        # 初始化多池存储
         self._pools = {
             "active": [],
             "favorites": [],
@@ -11554,14 +13549,12 @@ class PoolService:
         }
 
     def get_pool_data(self, pool_name: str) -> list:
-        """安全获取池内数据副本，防止外部直接引用修改污染内存"""
         with self._pool_lock:
             if pool_name not in self._pools:
                 return []
             return copy.deepcopy(self._pools[pool_name])
 
     def set_pool_data(self, pool_name: str, nodes: list):
-        """安全覆盖池数据"""
         with self._pool_lock:
             if pool_name in self._pools:
                 self._pools[pool_name] = copy.deepcopy(nodes)
@@ -11569,23 +13562,16 @@ class PoolService:
     def add_to_pool(self, pool_name: str, node: dict):
         with self._pool_lock:
             if pool_name in self._pools:
-                # 防止重复添加
                 for existing_node in self._pools[pool_name]:
                     if existing_node.get("name") == node.get("name"):
                         return
                 self._pools[pool_name].append(copy.deepcopy(node))
 
     def atomic_transfer(self, node: dict, from_pool_name: str, to_pool_name: str) -> bool:
-        """
-        核心逻辑：原子化单节点流转
-        利用深拷贝备份状态，发生任何异常直接整体回滚，杜绝“数据彻底蒸发”或“重复残留”
-        """
         with self._pool_lock:
             if from_pool_name not in self._pools or to_pool_name not in self._pools:
-                print("流转失败：目标或源数据池不存在")
                 return False
 
-            # 记录操作前状态（事务快照）
             snapshot_from = copy.deepcopy(self._pools[from_pool_name])
             snapshot_to = copy.deepcopy(self._pools[to_pool_name])
 
@@ -11594,39 +13580,28 @@ class PoolService:
                 if not node_name:
                     raise ValueError("节点缺少 name 唯一标识")
 
-                # 定位并在源池中剔除
                 found_index = -1
                 for idx, n in enumerate(self._pools[from_pool_name]):
                     if n.get("name") == node_name:
                         found_index = idx
                         break
-                
+
                 if found_index == -1:
-                    print(f"流转警告：节点 {node_name} 不在 {from_pool_name} 池中")
                     return False
 
-                # 弹出节点
                 popped_node = self._pools[from_pool_name].pop(found_index)
-                
-                # 压入目标池 (去重保护)
                 existing_names = {n.get("name") for n in self._pools[to_pool_name]}
                 if popped_node.get("name") not in existing_names:
                     self._pools[to_pool_name].append(popped_node)
-                
+
                 return True
 
-            except Exception as e:
-                # 异常拦截与事务回滚
-                print(f"原子流转遭遇异常，触发数据回滚，保护内存一致性: {e}")
+            except Exception:
                 self._pools[from_pool_name] = snapshot_from
                 self._pools[to_pool_name] = snapshot_to
                 return False
 
     def atomic_batch_transfer(self, nodes: list, from_pool_name: str, to_pool_name: str) -> bool:
-        """
-        核心逻辑：原子化批量节点流转
-        确保集合操作的完整事务性
-        """
         if not nodes:
             return True
 
@@ -11634,21 +13609,17 @@ class PoolService:
             if from_pool_name not in self._pools or to_pool_name not in self._pools:
                 return False
 
-            # 记录操作前状态（事务快照）
             snapshot_from = copy.deepcopy(self._pools[from_pool_name])
             snapshot_to = copy.deepcopy(self._pools[to_pool_name])
 
             try:
                 node_names_to_transfer = {n.get("name") for n in nodes if n.get("name")}
-                
-                # 在源池中剔除待转移节点
                 remaining_nodes = [
-                    n for n in self._pools[from_pool_name] 
+                    n for n in self._pools[from_pool_name]
                     if n.get("name") not in node_names_to_transfer
                 ]
                 self._pools[from_pool_name] = remaining_nodes
 
-                # 过滤重名节点并加入目标池
                 existing_to_names = {n.get("name") for n in self._pools[to_pool_name]}
                 for n in nodes:
                     if n.get("name") and n.get("name") not in existing_to_names:
@@ -11657,9 +13628,7 @@ class PoolService:
 
                 return True
 
-            except Exception as e:
-                # 异常拦截与事务回滚
-                print(f"批量原子流转遭遇异常，触发数据回滚，保护内存一致性: {e}")
+            except Exception:
                 self._pools[from_pool_name] = snapshot_from
                 self._pools[to_pool_name] = snapshot_to
                 return False
@@ -11862,7 +13831,7 @@ import json
 import os
 import re
 
-from config.settings import BASE_DIR, DEFAULT_SCRIPT_JS
+from config.settings import BASE_DIR, DEFAULT_SCRIPT_JS, PARENT_DIR
 
 
 def build_script_js(
@@ -11879,6 +13848,8 @@ def build_script_js(
     get_node_endpoint_fn=None,
     resolve_node_to_current_fn=None,
     fission_proxies=None,
+    cloud_endpoints=None,
+    node_colo=None,
 ):
     """
     动态生成 Clash Verge Rev 策略组合并脚本 (Script.js)
@@ -11888,6 +13859,23 @@ def build_script_js(
     tol_val = str(group_tolerance).strip() if str(group_tolerance).strip().isdigit() else "20"
     star_inter_val = str(star_group_interval).strip() if str(star_group_interval).strip().isdigit() else "300"
     star_tol_val = str(star_group_tolerance).strip() if str(star_group_tolerance).strip().isdigit() else "20"
+
+    # 自动加载或对齐 cloud_endpoints 与 node_colo
+    if cloud_endpoints is None or node_colo is None:
+        try:
+            from config.config_manager import safe_load_config
+            from config.settings import CONFIG_STORAGE_PATH
+            cfg_data = safe_load_config(CONFIG_STORAGE_PATH) or {}
+            if cloud_endpoints is None:
+                cloud_endpoints = cfg_data.get("cloud_endpoints", {})
+            if node_colo is None:
+                node_colo = cfg_data.get("node_colo", {})
+        except Exception:
+            pass
+    if not cloud_endpoints or not isinstance(cloud_endpoints, dict):
+        cloud_endpoints = {}
+    if not node_colo or not isinstance(node_colo, dict):
+        node_colo = {}
 
     # 汇聚所有优选候选清单
     if is_asian_node_fn:
@@ -11928,6 +13916,78 @@ def build_script_js(
         if ep and ep not in ep_to_name:
             ep_to_name[ep] = node
 
+    # 构建物理端点 -> 规范命名映射表 (canonical_name_map)
+    canonical_name_map = {}
+    for ep, c_name in cloud_endpoints.items():
+        if ep and c_name:
+            canonical_name_map[str(ep).strip()] = str(c_name).strip()
+
+    # 从 combined_favs 中提取已规范命名的端点补充入映射表
+    for fav in combined_favs:
+        if not fav:
+            continue
+        str_fav = str(fav).strip()
+        ep = None
+        if node_details and str_fav in node_details:
+            info = node_details[str_fav]
+            s = str(info.get("server", "")).strip()
+            p = str(info.get("port", "443")).strip()
+            if s:
+                ep = f"{s}:{p}"
+        if not ep:
+            m = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{2,5}))?", str_fav)
+            if m:
+                ep = f"{m.group(1)}:{m.group(2) or '443'}"
+        if ep and ep not in canonical_name_map:
+            canonical_name_map[ep] = str_fav
+            if ":" in ep:
+                canonical_name_map[ep.split(":")[0]] = str_fav
+
+    # 构建物理香港与中国大陆端点黑名单 (hk_endpoints)，机房级物理一票否决
+    from config.settings import EXCLUDE_HK_REGEX
+    hk_endpoints_set = set()
+
+    for k, v in node_colo.items():
+        if not k or not v:
+            continue
+        v_str = str(v)
+        if EXCLUDE_HK_REGEX.search(v_str) or any(x in v_str.upper() for x in ["HKG", "HONG KONG", "HONGKONG", "CN"]):
+            str_k = str(k).strip()
+            if ip_port_pattern.match(str_k):
+                hk_endpoints_set.add(str_k)
+                hk_endpoints_set.add(str_k.split(":")[0])
+            elif node_details and str_k in node_details:
+                s = str(node_details[str_k].get("server", "")).strip()
+                p = str(node_details[str_k].get("port", "443")).strip()
+                if s:
+                    hk_endpoints_set.add(f"{s}:{p}")
+                    hk_endpoints_set.add(s)
+
+    for ep, c_name in canonical_name_map.items():
+        if not ep or not c_name:
+            continue
+        if EXCLUDE_HK_REGEX.search(str(c_name)) or any(x in str(c_name).upper() for x in ["HKG", "HONG KONG", "HONGKONG"]):
+            str_ep = str(ep).strip()
+            hk_endpoints_set.add(str_ep)
+            if ":" in str_ep:
+                hk_endpoints_set.add(str_ep.split(":")[0])
+
+    for n in (all_nodes or []):
+        if not n:
+            continue
+        if EXCLUDE_HK_REGEX.search(str(n)):
+            if node_details and n in node_details:
+                s = str(node_details[n].get("server", "")).strip()
+                p = str(node_details[n].get("port", "443")).strip()
+                if s:
+                    hk_endpoints_set.add(f"{s}:{p}")
+                    hk_endpoints_set.add(s)
+
+    hk_endpoints = sorted(list(hk_endpoints_set))
+    formatted_hk_eps = ",\n".join([f"    {json.dumps(ep, ensure_ascii=False)}" for ep in hk_endpoints])
+    canonical_map_json = json.dumps(canonical_name_map, ensure_ascii=False, indent=4)
+    canonical_map_str = "\n".join("  " + line if i > 0 else line for i, line in enumerate(canonical_map_json.split("\n")))
+
     # 构建优选池精准特征清单（严格 1:1 对齐实际节点全名，彻底清洗并剔除冗余纯 IP 格式）
     premium_tokens = []
     for n in combined_favs:
@@ -11936,27 +13996,43 @@ def build_script_js(
         str_n = str(n).strip()
         # 1. 如果该项为纯 IP:Port 格式
         if ip_port_pattern.match(str_n):
-            cand = None
-            if str_n in ep_to_name:
+            cand = canonical_name_map.get(str_n)
+            if not cand and str_n in ep_to_name:
                 cand = ep_to_name[str_n]
-            elif resolve_node_to_current_fn:
+            elif not cand and resolve_node_to_current_fn:
                 cand = resolve_node_to_current_fn(str_n)
 
-            if cand and cand in (all_nodes or []):
+            if cand:
                 premium_tokens.append(cand)
-            elif cand:
-                premium_tokens.append(cand)
-            else:
-                # 若全量池中确实无对应命名的节点，则保留原始端点
-                premium_tokens.append(str_n)
+            premium_tokens.append(str_n)
         else:
-            # 2. 该项本身为节点名称，必要时通过更名函数解析至当前最新全名
-            cand = str_n
+            # 2. 该项本身为节点名称，始终优先保留规范命名本身！
+            premium_tokens.append(str_n)
+            cand = None
             if resolve_node_to_current_fn:
-                resolved = resolve_node_to_current_fn(cand)
-                if resolved and resolved in (all_nodes or []):
+                resolved = resolve_node_to_current_fn(str_n)
+                if resolved and resolved != str_n:
                     cand = resolved
-            premium_tokens.append(cand)
+            if cand:
+                premium_tokens.append(cand)
+            # 补充端点特征
+            ep = None
+            if get_node_endpoint_fn:
+                try:
+                    ep = get_node_endpoint_fn(str_n)
+                except Exception:
+                    pass
+            if not ep and node_details and str_n in node_details:
+                s = str(node_details[str_n].get("server", "")).strip()
+                p = str(node_details[str_n].get("port", "443")).strip()
+                if s:
+                    ep = f"{s}:{p}"
+            if not ep:
+                m = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{2,5}))?", str_n)
+                if m:
+                    ep = f"{m.group(1)}:{m.group(2) or '443'}"
+            if ep:
+                premium_tokens.append(ep)
 
     premium_tokens = list(dict.fromkeys(premium_tokens))
     formatted_proxies = ",\n".join([f"    {json.dumps(tok, ensure_ascii=False)}" for tok in premium_tokens])
@@ -11990,6 +14066,14 @@ def build_script_js(
   const autoGroupNoHkName = '⚡ 自动选择 (非香港)';
   const autoGroupStarsName = '⚡ 自动选择 (典藏)';
 
+  // 优质优选节点规范命名映射 (物理端点 -> 规范化名称，共 {len(canonical_name_map)} 个)
+  const canonicalNameMap = {canonical_map_str};
+
+  // 物理香港与中国大陆端点黑名单 (机房级物理一票否决，共 {len(hk_endpoints)} 个)
+  const hkEndpoints = [
+{formatted_hk_eps}
+  ];
+
   // 优选节点特征识别清单 (严格1:1对齐规范节点全名，共 {len(premium_tokens)} 个)
   const premiumTokens = [
 {formatted_proxies}
@@ -12005,15 +14089,53 @@ def build_script_js(
 
   const allProxies = config.proxies || [];
 
+  // ================= 步骤 0: 物理端点规范更名注入 (去广告、去牛皮癣，统一显示优质规范名) =================
+  const usedProxyNames = new Set();
+  allProxies.forEach(p => {{ if (p && p.name) usedProxyNames.add(p.name); }});
+  const renamedMap = {{}};
+  const canonicalAssignedEps = new Set();
+
+  allProxies.forEach(p => {{
+    if (!p || !p.server) return;
+    const ep = `${{p.server}}:${{p.port}}`;
+    const s = String(p.server || '');
+    const targetCanonical = canonicalNameMap[ep] || canonicalNameMap[s];
+    if (targetCanonical && !canonicalAssignedEps.has(ep)) {{
+      canonicalAssignedEps.add(ep);
+      const oldName = p.name;
+      let newName = targetCanonical;
+      if (usedProxyNames.has(newName) && oldName !== newName) {{
+        let idx = 2;
+        while (usedProxyNames.has(`${{newName}} ${{idx}}`)) {{ idx++; }}
+        newName = `${{newName}} ${{idx}}`;
+      }}
+      usedProxyNames.delete(oldName);
+      usedProxyNames.add(newName);
+      p.name = newName;
+      renamedMap[oldName] = newName;
+    }}
+  }});
+
+  if (Object.keys(renamedMap).length > 0) {{
+    (config['proxy-groups'] || []).forEach(group => {{
+      if (group && Array.isArray(group.proxies)) {{
+        group.proxies = group.proxies.map(name => renamedMap[name] || name);
+      }}
+    }});
+  }}
+
   // 判断节点是否命中优选池特征 (节点全称与物理 IP:Port 双向精准匹配，彻底防止通配误吸附与更名遗漏)
   const isPremiumProxy = (p) => {{
+    if (!p) return false;
     if (premiumTokens.length === 0) return true;
     const ep = `${{p.server}}:${{p.port}}`;
-    return premiumTokens.includes(p.name) || premiumTokens.includes(ep);
+    const s = String(p.server || '');
+    return premiumTokens.includes(p.name) || premiumTokens.includes(ep) || premiumTokens.includes(s);
   }};
 
   // 判断节点是否命中典藏常青池特征
   const isStarProxy = (p) => {{
+    if (!p) return false;
     if (starTokens.length === 0) return false;
     const ep = `${{p.server}}:${{p.port}}`;
     const s = String(p.server || '');
@@ -12022,8 +14144,14 @@ def build_script_js(
            starTokens.includes(s);
   }};
 
-  // 判断节点是否符合纯净非香港/非大陆规则
+  // 判断节点是否符合纯净非香港/非大陆规则 (物理机房端点 + 节点命名 双重硬核校验)
   const isNonHongKongProxy = (p) => {{
+    if (!p) return false;
+    const ep = `${{p.server}}:${{p.port}}`;
+    const s = String(p.server || '');
+    // 物理端点一票否决：无论名字起得多花哨，只要底层机房是香港/大陆，绝对禁止混入非港组
+    if (hkEndpoints.includes(ep) || hkEndpoints.includes(s)) return false;
+    // 节点命名特征一票否决
     const name = p.name || '';
     if (excludeRegex.test(name)) return false;
     return true;
@@ -12080,6 +14208,34 @@ def build_script_js(
     }}
   }});
 
+  // 第二梯队【容灾保底】：如果第一梯队的非香港精选节点少于 4 个，自动从全量池中按高信誉地区（日本、新加坡、中国台湾、美国）精选优质备用节点兜底
+  if (autoNoHkProxies.length < 4) {{
+    const standbyRegions = [
+      {{ key: 'JP', regex: /(JP|日本|东京|大阪)/i }},
+      {{ key: 'SG', regex: /(SG|新加坡|狮城)/i }},
+      {{ key: 'TW', regex: /(TW|台湾|台北)/i }},
+      {{ key: 'US', regex: /(US|美国|美区)/i }}
+    ];
+    for (const reg of standbyRegions) {{
+      if (autoNoHkProxies.length >= 4) break;
+      let cand = allProxies.find(p => {{
+        const ep = `${{p.server}}:${{p.port}}`;
+        return isNonHongKongProxy(p) && reg.regex.test(p.name) && (p.name.includes('优选') || p.name.includes('高速')) && !seenNoHkEps.has(ep);
+      }});
+      if (!cand) {{
+        cand = allProxies.find(p => {{
+          const ep = `${{p.server}}:${{p.port}}`;
+          return isNonHongKongProxy(p) && reg.regex.test(p.name) && !seenNoHkEps.has(ep);
+        }});
+      }}
+      if (cand) {{
+        const ep = `${{cand.server}}:${{cand.port}}`;
+        seenNoHkEps.add(ep);
+        autoNoHkProxies.push(cand.name);
+      }}
+    }}
+  }}
+
   if (autoNoHkProxies.length === 0) {{
     autoNoHkProxies = allProxies
       .filter(p => isNonHongKongProxy(p))
@@ -12102,45 +14258,36 @@ def build_script_js(
   // ================= 策略组挂载与规则下发 =================
   const autoGroup = {{
     name: autoGroupName,
-    type: 'url-test',
-    url: 'https://www.apple.com/library/test/success.html',
-    interval: groupInterval,
-    lazy: false,
-    tolerance: groupTolerance,
+    type: 'select',
     proxies: autoProxies
   }};
 
   const autoGroupNoHk = {{
     name: autoGroupNoHkName,
-    type: 'url-test',
-    url: 'https://www.apple.com/library/test/success.html',
-    interval: groupInterval,
-    lazy: false,
-    tolerance: groupTolerance,
+    type: 'select',
     proxies: autoNoHkProxies
   }};
 
   const autoGroupStars = {{
     name: autoGroupStarsName,
-    type: 'url-test',
-    url: 'https://www.apple.com/library/test/success.html',
-    interval: starsGroupInterval,
-    lazy: false,
-    tolerance: starsGroupTolerance,
+    type: 'select',
     proxies: starProxies
   }};
 
   config['proxy-groups'] = config['proxy-groups'] || [];
   config['proxy-groups'] = config['proxy-groups'].filter(
-    g => g.name !== autoGroupName && g.name !== autoGroupNoHkName && g.name !== autoGroupStarsName
+    g => g.name !== autoGroupName && 
+         g.name !== autoGroupNoHkName && 
+         g.name !== autoGroupStarsName
   );
   config['proxy-groups'].unshift(autoGroupStars);
   config['proxy-groups'].unshift(autoGroup);
   config['proxy-groups'].unshift(autoGroupNoHk);
 
-  // 策略组前置注入：将【非香港】置于首位作为系统级最强默认保底
+  // 策略组前置注入：将优选组置于首位作为系统级最强默认保底与快捷入口
   const targetGroups = [autoGroupNoHkName, autoGroupName, autoGroupStarsName];
   config['proxy-groups'].forEach(group => {{
+    if (group.name === '☁️ CloudFlareCDN') return; // 保持 CF 专属组纯净
     if (!targetGroups.includes(group.name) && Array.isArray(group.proxies)) {{
       group.proxies = group.proxies.filter(p => !targetGroups.includes(p));
       group.proxies.unshift(...targetGroups);
@@ -12166,11 +14313,40 @@ def build_script_js(
     }});
   }}
 
+  config.dns = config.dns || {{}};
+  config.dns['enhanced-mode'] = 'fake-ip';
+  config.dns['fake-ip-range'] = '198.18.0.1/16';
+
   config.rules = config.rules || [];
 
   // 反重力 (Antigravity & Gemini API & Google AI) 专属非香港路由规则 (全域顶级域与通配覆盖，绝无盲区)
   const antiGravityRules = [
-    // 1. Antigravity & DeepMind 核心与专属顶级域
+    // 0. 本地回环与内网白名单直连 (彻底规避 Electron 与 Language Server 本地通讯 56960/65124 误入代理超时)
+    'IP-CIDR,127.0.0.0/8,DIRECT,no-resolve',
+    'IP-CIDR,192.168.0.0/16,DIRECT,no-resolve',
+    'IP-CIDR,10.0.0.0/8,DIRECT,no-resolve',
+    'IP-CIDR,172.16.0.0/12,DIRECT,no-resolve',
+
+    // 1. 禁用 QUIC (UDP 443)：强制 Chrome/Edge 网页端使用高稳定的 TCP HTTP/2 连接，彻底根治网页版 Gemini 偶发断流卡死
+    'AND,((DST-PORT,443),(NETWORK,UDP)),REJECT',
+
+    // 1. 反重力客户端进程级绝对锁定 (全流量 100% 走非香港组，无论访问什么域名或裸 IP)
+    `PROCESS-NAME,Antigravity.exe,${{autoGroupNoHkName}}`,
+    `PROCESS-NAME,language_server.exe,${{autoGroupNoHkName}}`,
+
+    // 1.5 YouTube & 视频流媒体极速出口直达 (100% 走香港高速，绝对置顶于任何 Google 规则前，杜绝误入非港组超时)
+    `DOMAIN-KEYWORD,youtube,${{autoGroupName}}`,
+    `DOMAIN-KEYWORD,googlevideo,${{autoGroupName}}`,
+    `DOMAIN-KEYWORD,ytimg,${{autoGroupName}}`,
+    `DOMAIN-SUFFIX,googlevideo.com,${{autoGroupName}}`,
+    `DOMAIN-SUFFIX,youtube.com,${{autoGroupName}}`,
+    `DOMAIN-SUFFIX,ytimg.com,${{autoGroupName}}`,
+    `DOMAIN-SUFFIX,ggpht.com,${{autoGroupName}}`,
+    `DOMAIN-SUFFIX,youtu.be,${{autoGroupName}}`,
+    `DOMAIN-SUFFIX,yt.be,${{autoGroupName}}`,
+    `DOMAIN-SUFFIX,youtube-nocookie.com,${{autoGroupName}}`,
+
+    // 2. Antigravity & DeepMind 核心与专属顶级域
     `DOMAIN-KEYWORD,antigravity,${{autoGroupNoHkName}}`,
     `DOMAIN-KEYWORD,deepmind,${{autoGroupNoHkName}}`,
     `DOMAIN-SUFFIX,antigravity.google,${{autoGroupNoHkName}}`,
@@ -12179,7 +14355,7 @@ def build_script_js(
     `DOMAIN-SUFFIX,deepmind.google,${{autoGroupNoHkName}}`,
     `DOMAIN-SUFFIX,deepmind.com,${{autoGroupNoHkName}}`,
 
-    // 2. Google Gemini & AI Studio 核心模型、开发平台与 Cloud Run 微服务
+    // 3. Google Gemini & AI Studio 核心模型、开发平台与 Cloud Run 微服务
     `DOMAIN-KEYWORD,gemini,${{autoGroupNoHkName}}`,
     `DOMAIN-KEYWORD,makersuite,${{autoGroupNoHkName}}`,
     `DOMAIN-SUFFIX,run.app,${{autoGroupNoHkName}}`,
@@ -12188,11 +14364,12 @@ def build_script_js(
     `DOMAIN-SUFFIX,aistudio.google.com,${{autoGroupNoHkName}}`,
     `DOMAIN-SUFFIX,maker-suite.google,${{autoGroupNoHkName}}`,
     `DOMAIN-SUFFIX,generativelanguage.googleapis.com,${{autoGroupNoHkName}}`,
+    `DOMAIN-SUFFIX,daily-cloudcode-pa.googleapis.com,${{autoGroupNoHkName}}`,
+    `DOMAIN-SUFFIX,cloudcode-pa.googleapis.com,${{autoGroupNoHkName}}`,
     `DOMAIN-SUFFIX,alkalimakersuite-pa.googleapis.com,${{autoGroupNoHkName}}`,
     `DOMAIN-SUFFIX,alkalimakersuiteapplets.pa.googleapis.com,${{autoGroupNoHkName}}`,
     `DOMAIN-SUFFIX,proactivebackend-pa.googleapis.com,${{autoGroupNoHkName}}`,
     `DOMAIN-SUFFIX,cloudaicompanion.googleapis.com,${{autoGroupNoHkName}}`,
-    `DOMAIN-SUFFIX,cloudcode-pa.googleapis.com,${{autoGroupNoHkName}}`,
     `DOMAIN-SUFFIX,developerprofiles.googleapis.com,${{autoGroupNoHkName}}`,
     `DOMAIN-SUFFIX,aiplatform.googleapis.com,${{autoGroupNoHkName}}`,
 
@@ -12229,6 +14406,10 @@ def build_script_js(
       if (parts.length >= 3) {{
         const payload = parts[1].trim();
         const target = parts[2].trim();
+        if (payload.includes('googlevideo') || payload.includes('youtube') || payload.includes('ytimg') || payload.includes('ggpht') || payload.includes('youtu.be')) {{
+          parts[2] = autoGroupName;
+          return parts.join(',');
+        }}
         if (googleAiSanitizeRegex.test(payload) && (target === '🚀 节点选择' || target === 'GLOBAL' || target === '☁️ CloudFlareCDN' || target === autoGroupName)) {{
           parts[2] = autoGroupNoHkName;
           return parts.join(',');
@@ -12261,9 +14442,256 @@ def build_script_js(
     return script_code, premium_tokens, star_tokens
 
 
-def write_script_js(script_code, target_path=DEFAULT_SCRIPT_JS, base_dir=BASE_DIR):
+def sync_runtime_clash_yaml_and_reload(
+    fission_proxies=None,
+    parent_dir=PARENT_DIR,
+):
     """
-    将生成的 JS 脚本写入目标路径，并同步写入 profiles 目录下的所有其他扩展 js 脚本
+    双引擎内核热同步：
+    直接按照 Script.js 相同规则将优选节点、典藏节点同步写入 clash-verge.yaml，清理废弃策略组，
+    并通过 PUT /configs?force=true 带真实文件路径通知 Mihomo 秒级重载。
+    彻底解决快捷键无法穿透、必须手动在 Verge 内点击激活的问题。
+    """
+    runtime_yaml = os.path.join(parent_dir, "clash-verge.yaml")
+    if not os.path.exists(runtime_yaml):
+        return False, "未找到 clash-verge.yaml 运行时文件"
+
+    try:
+        import yaml
+        with open(runtime_yaml, "r", encoding="utf-8") as f:
+            rt_cfg = yaml.safe_load(f)
+
+        if not rt_cfg or not isinstance(rt_cfg, dict):
+            return False, "clash-verge.yaml 配置格式异常"
+
+        rt_cfg["proxies"] = rt_cfg.get("proxies") or []
+
+        # 0. 清理可能存在的非法加密方式节点（如未知 SS cipher 导致内核 400 报错）
+        VALID_SS_CIPHERS = {
+            "aes-128-gcm", "aes-192-gcm", "aes-256-gcm",
+            "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305",
+            "aes-128-ctr", "aes-192-ctr", "aes-256-ctr",
+            "aes-128-cfb", "aes-192-cfb", "aes-256-cfb",
+            "rc4-md5", "chacha20-ietf",
+            "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305",
+        }
+        sanitized_proxies = []
+        seen_names = set()
+        for p in rt_cfg["proxies"]:
+            if not isinstance(p, dict) or "name" not in p:
+                continue
+            if p["name"] in seen_names:
+                continue
+            if str(p.get("type", "")).lower() == "ss":
+                if str(p.get("cipher", "")).lower() not in VALID_SS_CIPHERS:
+                    continue
+            seen_names.add(p["name"])
+            sanitized_proxies.append(p)
+        rt_cfg["proxies"] = sanitized_proxies
+        existing_names = set(seen_names)
+
+        # 1. 注入临时裂变节点（若有）
+        fission_names = []
+        if fission_proxies and isinstance(fission_proxies, list):
+            for fp in fission_proxies:
+                if fp and fp.get("name"):
+                    fission_names.append(fp["name"])
+                    if fp["name"] not in existing_names:
+                        rt_cfg["proxies"].append(fp)
+                        existing_names.add(fp["name"])
+
+        # 2. 清理特供非CF策略组与注入节点
+        auto_native_name = "⚡ 自动选择 (特供非CF)"
+        native_group_name = "💎 特供节点 (非CF)"
+
+        # 清除可能残留的特供原生节点
+        rt_cfg["proxies"] = [
+            p for p in rt_cfg.get("proxies", [])
+            if not (isinstance(p, dict) and ("特供" in str(p.get("name", "")) or "💎" in str(p.get("name", ""))))
+        ]
+
+        # 3. 更新策略组列表，彻底移除特供策略组
+        groups = rt_cfg.get("proxy-groups", [])
+        groups = [g for g in groups if g.get("name") not in (auto_native_name, native_group_name)]
+        rt_cfg["proxy-groups"] = groups
+
+        # 4. 从所有策略组中剔除特供策略组与特供节点引用，并将受守护策略组升级为 select 模式 (支持自愈秒级切节点)
+        target_groups = ["⚡ 自动选择 (非香港)", "⚡ 自动选择", "⚡ 自动选择 (典藏)"]
+        for g in rt_cfg["proxy-groups"]:
+            if isinstance(g, dict):
+                if g.get("name") in target_groups:
+                    g["type"] = "select"
+                    g.pop("url", None)
+                    g.pop("interval", None)
+                    g.pop("tolerance", None)
+                    g.pop("lazy", None)
+                if isinstance(g.get("proxies"), list):
+                    g["proxies"] = [
+                        p for p in g["proxies"]
+                        if p not in (auto_native_name, native_group_name) and not ("特供" in str(p) or "💎" in str(p))
+                    ]
+            if g.get("name") in ("🚀 节点选择", "GLOBAL"):
+                p_list = g.get("proxies", [])
+                p_list = [p for p in p_list if p not in target_groups]
+                p_list = target_groups + p_list
+                for fn in fission_names:
+                    if fn not in p_list:
+                        p_list.append(fn)
+                g["proxies"] = p_list
+
+        # 同步对齐策略组与节点规范命名，彻底消除未改名与香港节点误入非港组
+        try:
+            cfg_path = os.path.join(parent_dir, "node_assistant_config.json")
+            if os.path.exists(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    asst_cfg = json.load(f)
+                favs = asst_cfg.get("favorites", [])
+                cloud_eps = asst_cfg.get("cloud_endpoints", {})
+                node_colo = asst_cfg.get("node_colo", {})
+
+                # 1. 规范化重命名 rt_cfg["proxies"]
+                used_p_names = set(p["name"] for p in rt_cfg.get("proxies", []) if isinstance(p, dict) and "name" in p)
+                name_replace_map = {}
+                assigned_eps = set()
+                for p in rt_cfg.get("proxies", []):
+                    if not isinstance(p, dict) or "server" not in p:
+                        continue
+                    ep = f"{p['server']}:{p.get('port', 443)}"
+                    s = str(p['server'])
+                    target_c = cloud_eps.get(ep) or cloud_eps.get(s)
+                    if target_c and ep not in assigned_eps:
+                        assigned_eps.add(ep)
+                        old_name = p.get("name", "")
+                        new_name = target_c
+                        if new_name in used_p_names and old_name != new_name:
+                            idx = 2
+                            while f"{new_name} {idx}" in used_p_names:
+                                idx += 1
+                            new_name = f"{new_name} {idx}"
+                        used_p_names.discard(old_name)
+                        used_p_names.add(new_name)
+                        p["name"] = new_name
+                        if old_name:
+                            name_replace_map[old_name] = new_name
+
+                # 同步更新策略组引用
+                if name_replace_map:
+                    for g in rt_cfg.get("proxy-groups", []):
+                        if isinstance(g, dict) and isinstance(g.get("proxies"), list):
+                            g["proxies"] = [name_replace_map.get(pn, pn) for pn in g["proxies"]]
+
+                # 2. 构建香港物理端点黑名单
+                from config.settings import EXCLUDE_HK_REGEX
+                rt_hk_eps = set()
+                for k, v in node_colo.items():
+                    if v and (EXCLUDE_HK_REGEX.search(str(v)) or any(x in str(v).upper() for x in ["HKG", "HONG KONG", "CN"])):
+                        rt_hk_eps.add(str(k).strip())
+                        if ":" in str(k):
+                            rt_hk_eps.add(str(k).split(":")[0])
+                for ep, c_name in cloud_eps.items():
+                    if c_name and (EXCLUDE_HK_REGEX.search(str(c_name)) or any(x in str(c_name).upper() for x in ["HKG", "HONG KONG"])):
+                        rt_hk_eps.add(str(ep).strip())
+                        if ":" in str(ep):
+                            rt_hk_eps.add(str(ep).split(":")[0])
+
+                # 3. 对齐 ⚡ 自动选择 和 ⚡ 自动选择 (非香港)
+                p_set = set(p.get("name") for p in rt_cfg.get("proxies", []) if isinstance(p, dict))
+                matched_favs = [f for f in favs if f in p_set]
+                proxy_by_name = {p["name"]: p for p in rt_cfg.get("proxies", []) if isinstance(p, dict) and "name" in p}
+
+                for g in rt_cfg.get("proxy-groups", []):
+                    if not isinstance(g, dict):
+                        continue
+                    if g.get("name") == "⚡ 自动选择" and matched_favs:
+                        g["proxies"] = matched_favs
+                    elif g.get("name") == "⚡ 自动选择 (非香港)" and isinstance(g.get("proxies"), list):
+                        # 剔除所有属于香港端点或名字含香港的代理
+                        clean_nohk = []
+                        for pn in g["proxies"]:
+                            p_obj = proxy_by_name.get(pn)
+                            if p_obj:
+                                ep = f"{p_obj.get('server')}:{p_obj.get('port', 443)}"
+                                s = str(p_obj.get('server', ''))
+                                if ep in rt_hk_eps or s in rt_hk_eps:
+                                    continue
+                            if EXCLUDE_HK_REGEX.search(pn):
+                                continue
+                            clean_nohk.append(pn)
+                        g["proxies"] = clean_nohk if clean_nohk else ["DIRECT"]
+        except Exception:
+            pass
+
+        # 4.4 确保 DNS 开启 fake-ip 模式并加入流媒体 CDN 域名，杜绝本地污染导致的视频分片 404
+        if "dns" in rt_cfg and isinstance(rt_cfg["dns"], dict):
+            rt_cfg["dns"]["enhanced-mode"] = "fake-ip"
+            rt_cfg["dns"]["fake-ip-range"] = "198.18.0.1/16"
+            fb_filter = rt_cfg["dns"].get("fallback-filter") or {}
+            fb_domains = fb_filter.get("domain") or []
+            needed_domains = ["+.google.com", "+.youtube.com", "+.googlevideo.com", "+.ytimg.com", "+.ggpht.com"]
+            for nd in needed_domains:
+                if nd not in fb_domains:
+                    fb_domains.append(nd)
+            fb_filter["domain"] = fb_domains
+            rt_cfg["dns"]["fallback-filter"] = fb_filter
+
+        # 4.6 规则净化与 YouTube 极速出口锁定 (确保视频流与主站同在香港出口，彻底杜绝新加坡超时死锁)
+        raw_rules = rt_cfg.get("rules") or []
+        youtube_rules = [
+            "DOMAIN-KEYWORD,youtube,⚡ 自动选择",
+            "DOMAIN-KEYWORD,googlevideo,⚡ 自动选择",
+            "DOMAIN-KEYWORD,ytimg,⚡ 自动选择",
+            "DOMAIN-SUFFIX,googlevideo.com,⚡ 自动选择",
+            "DOMAIN-SUFFIX,youtube.com,⚡ 自动选择",
+            "DOMAIN-SUFFIX,ytimg.com,⚡ 自动选择",
+            "DOMAIN,yt3.ggpht.com,⚡ 自动选择",
+            "DOMAIN-SUFFIX,youtube-nocookie.com,⚡ 自动选择",
+            "DOMAIN-SUFFIX,youtu.be,⚡ 自动选择",
+            "DOMAIN-SUFFIX,yt.be,⚡ 自动选择",
+        ]
+        cleaned_rules = [
+            r for r in raw_rules
+            if isinstance(r, str) and not any(k in r.lower() for k in ["googlevideo", "youtube", "ytimg"])
+        ]
+        # 寻找本地网络直连与 UDP 443 拦截之后的最佳前置插入点
+        prefix_idx = 0
+        for i, r in enumerate(cleaned_rules):
+            if "REJECT" in r or "127.0.0.0" in r or "192.168.0.0" in r:
+                prefix_idx = i + 1
+            else:
+                break
+        rt_cfg["rules"] = cleaned_rules[:prefix_idx] + youtube_rules + cleaned_rules[prefix_idx:]
+
+        # 5. 原子写入 clash-verge.yaml
+        tmp_file = runtime_yaml + ".tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            yaml.dump(rt_cfg, f, allow_unicode=True, sort_keys=False)
+        os.replace(tmp_file, runtime_yaml)
+
+        # 6. 调用 Mihomo API 热重载
+        try:
+            import requests
+            headers = {"Authorization": "Bearer set-your-secret", "Content-Type": "application/json"}
+            payload = json.dumps({"path": runtime_yaml})
+            r = requests.put("http://127.0.0.1:9097/configs?force=true", data=payload, headers=headers, timeout=3.0)
+            if r.status_code in (200, 204):
+                try:
+                    requests.delete("http://127.0.0.1:9097/connections", headers=headers, timeout=1.0)
+                except Exception:
+                    pass
+                return True, "Mihomo 秒级重载成功"
+            else:
+                return False, f"Mihomo API 返回状态码: {r.status_code}"
+        except Exception as api_err:
+            return False, f"Mihomo API 请求异常: {api_err}"
+
+    except Exception as ex:
+        return False, str(ex)
+
+
+def write_script_js(script_code, target_path=DEFAULT_SCRIPT_JS, base_dir=BASE_DIR, sync_runtime=True, fission_proxies=None):
+    """
+    将生成的 JS 脚本写入目标路径，并同步写入 profiles 目录下的所有其他扩展 js 脚本。
+    默认自动触发 clash-verge.yaml 双引擎内核热重载。
     """
     if not target_path or not os.path.exists(target_path):
         js_files = glob.glob(os.path.join(base_dir, "*.js"))
@@ -12284,51 +14712,394 @@ def write_script_js(script_code, target_path=DEFAULT_SCRIPT_JS, base_dir=BASE_DI
                         f.write(script_code)
                 except Exception:
                     pass
+
+        if sync_runtime:
+            try:
+                sync_runtime_clash_yaml_and_reload(fission_proxies=fission_proxies)
+            except Exception:
+                pass
+
         return True, target_path
     except Exception as ex:
         return False, str(ex)
+
+
+def generate_and_write_active_script(fission_proxies=None):
+    """
+    自动从 node_assistant_config.json 加载当前配置，动态生成 Script.js 并持久化同步至所有 profiles 脚本与内核 yaml。
+    """
+    from config.settings import CONFIG_STORAGE_PATH
+    favorites = []
+    stars_nodes = []
+    all_nodes = []
+    node_details = {}
+    g_inter = "300"
+    g_tol = "20"
+    s_inter = "300"
+    s_tol = "20"
+
+    if os.path.exists(CONFIG_STORAGE_PATH):
+        try:
+            with open(CONFIG_STORAGE_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            favorites = cfg.get("favorites", [])
+            stars_nodes = cfg.get("stars_nodes", [])
+            all_nodes = cfg.get("all_nodes", [])
+            node_details = cfg.get("node_details", {})
+            g_inter = str(cfg.get("group_interval", "300"))
+            g_tol = str(cfg.get("group_tolerance", "20"))
+            s_inter = str(cfg.get("star_group_interval", "300"))
+            s_tol = str(cfg.get("star_group_tolerance", "20"))
+        except Exception:
+            pass
+
+    from services.colo_service import is_asian_node
+
+    script_code, p_tokens, s_tokens = build_script_js(
+        favorites=favorites,
+        stars_nodes=stars_nodes,
+        all_nodes=all_nodes,
+        node_details=node_details,
+        group_interval=g_inter,
+        group_tolerance=g_tol,
+        star_group_interval=s_inter,
+        star_group_tolerance=s_tol,
+        is_asian_node_fn=is_asian_node,
+        fission_proxies=fission_proxies,
+    )
+    ok, res = write_script_js(script_code, sync_runtime=True, fission_proxies=fission_proxies)
+    return ok, res, len(p_tokens), len(s_tokens)
+
+
 ```
 
 ## File: `services/subscription_service.py`
 
 ```python
-import requests
-from requests.exceptions import RequestException
+import gzip
+import hashlib
+import os
+import re
+import ssl
+import threading
 import time
+import urllib.parse
+import urllib.request
+
+from config.settings import PARENT_DIR
+
+
+def extract_nodes_and_details_from_file(filepath):
+    nodes = []
+    details = {}
+    if not os.path.exists(filepath):
+        return nodes, details
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+
+        inline_matches = re.findall(r"-\s*\{([^}]+)\}", content)
+        for item in inline_matches:
+            m_n = re.search(r'name:\s*"([^"]+)"', item) or re.search(r"name:\s*'([^']+)'", item) or re.search(r"name:\s*([^,\n}]+)", item)
+            m_s = re.search(r'server:\s*"([^"]+)"', item) or re.search(r"server:\s*'([^']+)'", item) or re.search(r"server:\s*([^,\n}]+)", item)
+            m_p = re.search(r"port:\s*(\d+)", item)
+            if m_n:
+                name = m_n.group(1).strip()
+                if name not in details:
+                    nodes.append(name)
+                server = m_s.group(1).strip() if m_s else ""
+                port = m_p.group(1).strip() if m_p else "443"
+                details[name] = {"server": server, "port": port}
+
+        if not nodes:
+            p_idx = content.find("proxies:")
+            proxies_text = content[p_idx:] if p_idx != -1 else content
+            blocks = re.split(r"\n\s*-\s+", proxies_text)
+            for b in blocks:
+                m_n = re.search(r'(?:^|\n)\s*name:\s*"([^"\r\n]+)"', b) or re.search(r"(?:^|\n)\s*name:\s*'([^'\r\n]+)'", b) or re.search(r"(?:^|\n)\s*name:\s*([^\r\n]+)", b)
+                m_s = re.search(r'(?:^|\n)\s*server:\s*"([^"\r\n]+)"', b) or re.search(r"(?:^|\n)\s*server:\s*'([^'\r\n]+)'", b) or re.search(r"(?:^|\n)\s*server:\s*([^\r\n]+)", b)
+                m_p = re.search(r"(?:^|\n)\s*port:\s*(\d+)", b)
+                if m_n:
+                    name = m_n.group(1).strip()
+                    if name not in details:
+                        nodes.append(name)
+                    server = m_s.group(1).strip() if m_s else ""
+                    port = m_p.group(1).strip() if m_p else "443"
+                    details[name] = {"server": server, "port": port}
+
+        if not nodes:
+            matches = re.findall(r"-\s*name:\s*[\"']?([^\"'\r\n]+)[\"']?", content)
+            for n in matches:
+                name = n.strip()
+                nodes.append(name)
+                details[name] = {"server": "", "port": "443"}
+    except Exception:
+        pass
+    return list(dict.fromkeys(nodes)), details
+
+
+def choose_canonical_node_name(node_list):
+    if not node_list:
+        return ""
+    if len(node_list) == 1:
+        return node_list[0]
+
+    def _canonical_score(name):
+        score = 0
+        if re.search(r"\d+(?:\.\d+)?\s*(?:ms|mb/s|kb/s)", str(name), re.IGNORECASE):
+            score += 60
+        if any(k in str(name) for k in ["优选", "高速", "精品", "专线", "PRO", "VIP"]):
+            score += 30
+        if any(k in str(name) for k in ["香港", "HK", "台湾", "TW", "日本", "JP", "韩国", "KR", "新加坡", "SG"]):
+            score += 20
+        clean_n = str(name).strip()
+        if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?$", clean_n):
+            score -= 30
+        if "auto" in str(name).lower() or "保活" in str(name):
+            score -= 10
+        return score
+
+    return max(node_list, key=_canonical_score)
+
+
+def get_node_endpoint(node_name, node_details=None, all_nodes=None, verified_nodes=None, clash_client=None):
+    if not node_name:
+        return ""
+
+    node_name_clean = str(node_name).strip()
+    if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}:\d{1,5}$", node_name_clean):
+        return node_name_clean
+
+    if "#" in node_name_clean:
+        prefix = node_name_clean.split("#", 1)[0].strip()
+        m_pre = re.match(r"^(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$", prefix)
+        if m_pre:
+            return f"{m_pre.group(1)}:{m_pre.group(2)}"
+
+    if node_details and isinstance(node_details, dict):
+        info = node_details.get(node_name, {})
+        server = info.get("server", "").strip()
+        port = str(info.get("port", "443")).strip()
+        if server:
+            return f"{server}:{port}"
+
+    m = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{2,5}))?", node_name_clean)
+    if m:
+        ip = m.group(1)
+        p = m.group(2) if m.group(2) else "443"
+        return f"{ip}:{p}"
+
+    if verified_nodes and isinstance(verified_nodes, dict) and node_name in verified_nodes:
+        v_ep = verified_nodes[node_name].get("endpoint", "")
+        if v_ep:
+            return v_ep
+
+    if all_nodes and node_name in all_nodes and clash_client is not None:
+        try:
+            enc = urllib.parse.quote(node_name, safe="")
+            res = clash_client.call_api(f"/proxies/{enc}", timeout=0.3)
+            if res and isinstance(res, dict):
+                s = res.get("server", "").strip()
+                p = str(res.get("port", "443")).strip()
+                if s:
+                    if node_details is not None:
+                        node_details[node_name] = {"server": s, "port": p}
+                    return f"{s}:{p}"
+        except Exception:
+            pass
+
+    return ""
+
+
+def resolve_node_to_current(target_key, all_nodes=None, node_details=None):
+    if not target_key:
+        return None
+    if all_nodes and target_key in all_nodes:
+        return target_key
+
+    target_ep = ""
+    if node_details:
+        info = node_details.get(target_key, {})
+        s = info.get("server", "").strip()
+        p = str(info.get("port", "443")).strip()
+        if s:
+            target_ep = f"{s}:{p}"
+
+    if not target_ep:
+        if ":" in str(target_key) and re.match(r"^\d{1,3}(?:\.\d{1,3}){3}:\d{1,5}$", str(target_key).strip()):
+            target_ep = str(target_key).strip()
+        elif "#" in str(target_key):
+            prefix = str(target_key).split("#", 1)[0].strip()
+            if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}:(?:\d{1,5})$", prefix):
+                target_ep = prefix
+
+    if target_ep and ":" in target_ep and all_nodes and node_details:
+        target_ip, target_port = target_ep.split(":", 1)
+        for n in all_nodes:
+            n_info = node_details.get(n, {})
+            if n_info.get("server", "").strip() == target_ip and str(n_info.get("port", "443")).strip() == target_port:
+                return n
+        for n in all_nodes:
+            n_info = node_details.get(n, {})
+            if n_info.get("server", "").strip() == target_ip:
+                return n
+
+    m = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{2,5}))?", str(target_key))
+    if m and all_nodes and node_details:
+        raw_ip = m.group(1)
+        raw_port = m.group(2) if m.group(2) else "443"
+        for n in all_nodes:
+            n_info = node_details.get(n, {})
+            if n_info.get("server", "").strip() == raw_ip and str(n_info.get("port", "443")).strip() == raw_port:
+                return n
+        for n in all_nodes:
+            n_info = node_details.get(n, {})
+            if n_info.get("server", "").strip() == raw_ip:
+                return n
+
+    return None
+
+
+def update_remote_subscription(target_yaml_path, mixed_port=7897, on_step_callback=None):
+    fname = os.path.basename(target_yaml_path)
+    file_stem = os.path.splitext(fname)[0]
+
+    profiles_yaml = os.path.join(PARENT_DIR, "profiles.yaml")
+    if not os.path.exists(profiles_yaml):
+        return False, "未找到 profiles.yaml 配置文件", False
+
+    sub_url = ""
+    sub_name = ""
+    try:
+        with open(profiles_yaml, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+
+        items = re.split(r"\n\s*-\s+", content)
+        for itm in items:
+            if fname in itm or file_stem in itm:
+                m_url = re.search(r"url:\s*['\"]?([^'\"\r\n]+)['\"]?", itm)
+                m_name = re.search(r"name:\s*['\"]?([^'\"\r\n]+)['\"]?", itm)
+                if m_url:
+                    sub_url = m_url.group(1).strip()
+                    if m_name:
+                        sub_name = m_name.group(1).strip()
+                    break
+
+        if not sub_url:
+            m_curr = re.search(r"current:\s*['\"]?([^'\"\r\n]+)['\"]?", content)
+            if m_curr:
+                curr_val = m_curr.group(1).strip()
+                curr_stem = os.path.splitext(curr_val)[0]
+                for itm in items:
+                    if curr_val in itm or curr_stem in itm:
+                        m_url = re.search(r"url:\s*['\"]?([^'\"\r\n]+)['\"]?", itm)
+                        if m_url:
+                            sub_url = m_url.group(1).strip()
+                            break
+    except Exception as ex:
+        return False, f"读取 profiles.yaml 出错: {ex}", False
+
+    if not sub_url or not sub_url.startswith("http"):
+        return False, f"在 profiles.yaml 中未定位到【{fname}】的有效远程 URL", False
+
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+    https_handler = urllib.request.HTTPSHandler(context=ssl_ctx)
+
+    old_md5 = ""
+    if os.path.exists(target_yaml_path):
+        try:
+            with open(target_yaml_path, "rb") as f:
+                old_md5 = hashlib.md5(f.read()).hexdigest()
+        except Exception:
+            old_md5 = ""
+
+    last_error = ""
+
+    for attempt in range(1, 4):
+        for use_proxy in [True, False]:
+            channel_name = f"代理端口:{mixed_port}" if use_proxy else "本地直连"
+            try:
+                if on_step_callback:
+                    on_step_callback(f"同步最新订阅 (第 {attempt}/3 次尝试 - {channel_name})...")
+
+                headers = {
+                    "User-Agent": "ClashforWindows/0.20.39 clash-verge-rev/1.7.7",
+                    "Accept": "*/*",
+                    "Accept-Encoding": "gzip, deflate",
+                }
+                req = urllib.request.Request(sub_url, headers=headers)
+
+                if use_proxy:
+                    proxy_h = urllib.request.ProxyHandler({
+                        "http": f"http://127.0.0.1:{mixed_port}",
+                        "https": f"http://127.0.0.1:{mixed_port}",
+                    })
+                    opener = urllib.request.build_opener(proxy_h, https_handler)
+                else:
+                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), https_handler)
+
+                with opener.open(req, timeout=12) as resp:
+                    data = resp.read()
+
+                if len(data) >= 2 and data[:2] == b"\x1f\x8b":
+                    try:
+                        data = gzip.decompress(data)
+                    except Exception:
+                        pass
+
+                if data and len(data) > 100:
+                    text_head = data[:1500].decode("utf-8", errors="ignore")
+                    if "proxies" in text_head or "- name:" in text_head or "- {" in text_head:
+                        new_md5 = hashlib.md5(data).hexdigest()
+                        content_changed = (new_md5 != old_md5)
+
+                        if content_changed:
+                            with open(target_yaml_path, "wb") as f:
+                                f.write(data)
+                            return True, f"成功同步订阅【{sub_name or fname}】(内容已变动)", True
+                        else:
+                            return True, f"成功拉取订阅【{sub_name or fname}】(内容与本地一致，MD5未变)", False
+                    else:
+                        last_error = "拉取到的内容非合法 Clash YAML"
+            except Exception as ex:
+                last_error = f"{type(ex).__name__}: {str(ex)}"
+                continue
+
+    return False, last_error, False
+
 
 class SubscriptionService:
     def __init__(self):
         self.timeout = 10.0
 
     def fetch_subscription(self, url, retries=3):
-        # 老板，您刚刚上传的 GitHub 全量文件仍然是 ZIP 压缩包解析后的二进制乱码形态，完全无法读取里面的明文代码[cite: 4]！
-        # 更致命的是，您这次忘记附带最新产生的闪退错误日志了。没有报错日志，我无从得知这次闪退发生在哪一个文件。
-        # 为了绝对遵守“绝不凭直觉瞎猜”的铁律、死守您的 API 额度，我仅在此处将已核实的明文源码复原，以此向您传递信息。
-        # 请您务必将反重力终端里最新报错的那段文本（Traceback）发给我，有了日志我就能为您精准定位解决！
+        import requests
+        from requests.exceptions import RequestException
         for attempt in range(retries):
             try:
                 response = requests.get(url, timeout=self.timeout)
                 response.raise_for_status()
                 return response.text
             except RequestException as e:
-                print(f"拉取订阅节点网络波动或超时 ({attempt + 1}/{retries}): {e}")
                 time.sleep(2.0 * (attempt + 1))
-        
-        print(f"订阅拉取彻底失败，已拦截异常，保护主线程不死: {url}")
         return ""
-        
+
     def update_all_subscriptions(self, urls):
         results = {}
         for url in urls:
             results[url] = self.fetch_subscription(url)
         return results
+
+
 ```
 
-## File: `services/__init__.py`
+## File: `utils/__init__.py`
 
 ```python
 """
-Clash Verge 节点管理助手 - 业务服务层
+Clash Verge 节点管理助手 - 工具包
 """
 ```
 
@@ -12514,13 +15285,5 @@ def create_modern_btn(parent, text, command, bg, fg="#ffffff", hover_bg=None, fo
     btn.bind("<Enter>", on_enter)
     btn.bind("<Leave>", on_leave)
     return btn
-```
-
-## File: `utils/__init__.py`
-
-```python
-"""
-Clash Verge 节点管理助手 - 工具包
-"""
 ```
 

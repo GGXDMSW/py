@@ -15,12 +15,42 @@ from services.probe_service import detect_node_region
 def get_colo_region(code):
     """
     获取 Colo 代码或国家二字码对应的宏观大区 (如 Asia_KR, Asia_JP, Asia_HK, NA, EU 等)
+    全面兼容复合机房展示字符串（如 "东京 NRT"、"韩国 KR (SK)"、"首尔 ICN"、"日本 JP (Choopa)" 等）
     """
     if not code or code == "-":
         return "OTHER"
-    code_upper = code.strip().upper()
+    code_str = str(code).strip()
+    code_upper = code_str.upper()
     if code_upper in COLO_REGIONS:
         return COLO_REGIONS[code_upper]
+
+    # 1. 优先从字符串中提取二至四位大写代号匹配 (如 NRT, ICN, SIN, SJC, FRA 等)
+    tokens = re.findall(r"[A-Z]{2,4}", code_upper)
+    for tok in tokens:
+        if tok in COLO_REGIONS:
+            return COLO_REGIONS[tok]
+
+    # 2. 中文地名语义映射兜底
+    CN_REGION_MAP = [
+        ("日本", "Asia_JP"), ("东京", "Asia_JP"), ("大阪", "Asia_JP"), ("名古屋", "Asia_JP"), ("福冈", "Asia_JP"),
+        ("韩国", "Asia_KR"), ("首尔", "Asia_KR"), ("仁川", "Asia_KR"), ("釜山", "Asia_KR"),
+        ("香港", "Asia_HK"), ("澳门", "Asia_HK"),
+        ("台湾", "Asia_TW"), ("台北", "Asia_TW"), ("高雄", "Asia_TW"),
+        ("新加坡", "Asia_SG"), ("狮城", "Asia_SG"),
+        ("马来西亚", "Asia_MY"), ("吉隆坡", "Asia_MY"),
+        ("泰国", "Asia_TH"), ("曼谷", "Asia_TH"),
+        ("越南", "Asia_VN"), ("河内", "Asia_VN"), ("胡志明", "Asia_VN"),
+        ("印度", "Asia_IN"), ("孟买", "Asia_IN"), ("德里", "Asia_IN"),
+        ("美国", "NA"), ("美区", "NA"), ("洛杉矶", "NA"), ("圣何塞", "NA"), ("旧金山", "NA"),
+        ("西雅图", "NA"), ("芝加哥", "NA"), ("纽约", "NA"), ("加拿大", "NA"),
+        ("德国", "EU"), ("法兰克福", "EU"), ("英国", "EU"), ("伦敦", "EU"), ("法国", "EU"), ("巴黎", "EU"),
+        ("荷兰", "EU"), ("阿姆斯特丹", "EU"), ("俄罗斯", "EU"),
+        ("澳大利亚", "OC"), ("悉尼", "OC"), ("墨尔本", "OC"),
+    ]
+    for kw, reg in CN_REGION_MAP:
+        if kw in code_str:
+            return reg
+
     return "OTHER"
 
 
@@ -156,13 +186,19 @@ def is_node_hongkong(node_name):
 def is_asian_node(node_name, colo=None):
     """
     判断节点是否为亚洲节点（严格排除美区、欧洲、大洋洲、非洲等）
+    实测物理机房 (Colo) 拥有最高真理层级 (Ground Truth)：
+    - 若实测为亚洲机房 (Asia_*)，绝对判定为亚洲 (True)，物理数据最高，豁免一切文本关键词误判！
+    - 若实测为非亚洲机房 (NA, EU, OC, SA, AF)，绝对判定为非亚洲 (False)！
+    - 仅在未知 Colo 或 OTHER 时，退回文本关键词与国家码严谨排查。
     """
     if not node_name:
         return False
 
-    # 若已知 Colo 且 Colo 在非亚洲列表中，直接判定为非亚洲
+    # 0. 物理机房实测最高真理原则
     if colo and colo != "-":
         reg = get_colo_region(colo)
+        if reg.startswith("Asia_"):
+            return True
         if reg in ["NA", "EU", "OC", "SA", "AF"]:
             return False
 

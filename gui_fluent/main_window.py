@@ -5,21 +5,30 @@ import sys
 
 if "PyQt5" in sys.modules:
     from PyQt5.QtCore import Qt
+    from PyQt5.QtGui import QIcon
     from PyQt5.QtWidgets import (
         QApplication,
         QWidget,
         QVBoxLayout,
         QHBoxLayout,
         QStackedWidget,
+        QSystemTrayIcon,
+        QMenu,
+        QAction,
+        QStyle,
     )
 else:
     from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QIcon, QAction
     from PyQt6.QtWidgets import (
         QApplication,
         QWidget,
         QVBoxLayout,
         QHBoxLayout,
         QStackedWidget,
+        QSystemTrayIcon,
+        QMenu,
+        QStyle,
     )
 
 from qfluentwidgets import (
@@ -99,6 +108,10 @@ class MainWindow(QWidget):
         # 9. 恢复初始配置与历史回显
         cfg = self.controller.load_config() or {}
         self.restore_ui_config(cfg)
+
+        # 10. 初始化 Windows 系统托盘与自愈守护信号
+        self._init_system_tray()
+        self._bind_auto_heal_signals()
 
     def init_layout_structure(self):
         """
@@ -261,6 +274,13 @@ class MainWindow(QWidget):
         pc.btn_save_group.clicked.connect(self._on_save_group_clicked)
         pc.btn_test_worker.clicked.connect(self._on_test_worker_clicked)
         pc.btn_sync_auto.clicked.connect(self._on_sync_auto_clicked)
+
+        # 第 6 行：自愈守护与诊断控件绑定
+        pc.chk_auto_heal.stateChanged.connect(self._on_auto_heal_toggled)
+        pc.btn_diagnose_link.clicked.connect(self._on_diagnose_link_clicked)
+        pc.auto_heal_threshold.textChanged.connect(self._update_auto_heal_params)
+        pc.auto_heal_cooldown.textChanged.connect(self._update_auto_heal_params)
+        pc.chk_minimize_to_tray.stateChanged.connect(self._on_tray_pref_changed)
 
         # 绑定流水线结束与状态信号
         self.controller.pipeline_finished.connect(self._on_pipeline_finished)
@@ -660,6 +680,155 @@ class MainWindow(QWidget):
         self.controller.log(f"⚡ 收到优质池自愈降级请求: {reason}，自动启动全量大优选...")
         self._on_run_pipeline_clicked()
 
+    # ==================== Windows 系统托盘与断流秒级自愈 ====================
+
+    def _init_system_tray(self):
+        """
+        初始化 Windows 系统托盘与右键菜单
+        """
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+
+        icon = self.windowIcon()
+        if not icon or icon.isNull():
+            icon = QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DriveNetIcon)
+
+        self.tray_icon = QSystemTrayIcon(icon, self)
+        self.tray_icon.setToolTip("Clash Verge 节点管理助手 (断流秒级自愈守护中)")
+
+        tray_menu = QMenu()
+        act_show = tray_menu.addAction("显示主界面")
+        act_show.triggered.connect(self._show_window)
+
+        act_diag = tray_menu.addAction("⚡ 诊断当前链路")
+        act_diag.triggered.connect(self._on_diagnose_link_clicked)
+
+        self.act_tray_heal_toggle = tray_menu.addAction("🛡️ 断流秒级自愈")
+        self.act_tray_heal_toggle.setCheckable(True)
+        self.act_tray_heal_toggle.setChecked(self.pipeline_card.chk_auto_heal.isChecked())
+        self.act_tray_heal_toggle.triggered.connect(lambda chk: self.pipeline_card.chk_auto_heal.setChecked(chk))
+
+        tray_menu.addSeparator()
+        act_quit = tray_menu.addAction("退出应用")
+        act_quit.triggered.connect(self._force_quit)
+
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        self.tray_icon.show()
+        self._tray_balloon_shown = False
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            if self.isVisible() and not self.isMinimized():
+                self.hide()
+            else:
+                self._show_window()
+
+    def _show_window(self):
+        self.showNormal()
+        self.activateWindow()
+
+    def _force_quit(self):
+        if hasattr(self, 'controller') and self.controller:
+            self.controller.save_config(self.controller.state.get_snapshot())
+            self.controller.log("💾 正在退出并保存所有状态...")
+        QApplication.quit()
+
+    def _bind_auto_heal_signals(self):
+        self.controller.auto_heal_status_updated.connect(self._on_auto_heal_status_updated)
+        self.controller.auto_heal_event_triggered.connect(self._on_auto_heal_event_triggered)
+
+    def _on_auto_heal_status_updated(self, status: dict):
+        if not status:
+            return
+        healed_count = status.get("healed_count", 0)
+        enabled = status.get("enabled", True)
+        act_node = status.get("active_node", "")
+        nohk_node = status.get("active_nohk_node", "")
+
+        def _fmt(n):
+            if not n:
+                return "无"
+            return n if len(n) <= 14 else n[:12] + ".."
+
+        pc = self.pipeline_card
+        yc_count = status.get("yellow_cards_count", 0)
+        yc_str = f" | 🟨预警: {yc_count}" if yc_count > 0 else ""
+        if not enabled:
+            pc.lbl_auto_heal_status.setText(f"⏸ 自愈已暂停")
+            pc.lbl_auto_heal_status.setStyleSheet("color: #94a3b8; font-weight: bold;")
+        else:
+            pc.lbl_auto_heal_status.setText(f"🟢 链路守卫中 (全量: {_fmt(act_node)} | 非港: {_fmt(nohk_node)} | 自愈: {healed_count}次{yc_str})")
+            pc.lbl_auto_heal_status.setStyleSheet("color: #34d399; font-weight: bold;")
+
+        if hasattr(self, "tray_icon") and self.tray_icon:
+            yc_tip = f"\n黄牌预警: {yc_count}个" if yc_count > 0 else ""
+            self.tray_icon.setToolTip(f"Clash Verge 节点助手\n全量: {act_node}\n非港AI: {nohk_node}\n今日自愈: {healed_count}次{yc_tip}")
+
+    def _on_auto_heal_event_triggered(self, dead_node: str, backup_node: str, info: dict):
+        grp = info.get("group", "⚡ 自动选择")
+        is_non_hk = info.get("is_non_hk", False)
+        cost_ms = info.get("cost_ms", 0)
+        evicted = info.get("evicted", 0)
+        tag = "非港AI" if is_non_hk else "全量出口"
+        title = f"🛡️ 【{tag}】秒级断流自愈"
+        tip = "\n✨ 严格继承非港限制，Gemini/反重力不受影响" if is_non_hk else ""
+        msg = f"策略组 【{grp}】 坏死断流！\n已在 {cost_ms}ms 内斩断 {evicted} 条僵尸连接，并顺移至 【{backup_node}】{tip}"
+        if hasattr(self, "tray_icon") and self.tray_icon:
+            self.tray_icon.showMessage(title, msg, QSystemTrayIcon.MessageIcon.Information, 4500)
+
+    def _on_auto_heal_toggled(self, state: int):
+        enabled = bool(state == 2 or (hasattr(Qt, "CheckState") and state == Qt.CheckState.Checked.value) or bool(state))
+        self.controller.toggle_auto_heal(enabled)
+        if hasattr(self, "act_tray_heal_toggle"):
+            self.act_tray_heal_toggle.setChecked(enabled)
+        self.controller.save_config({"auto_heal_enabled": enabled})
+
+    def _on_diagnose_link_clicked(self):
+        res = self.controller.diagnose_current_link()
+        node = res.get("active_node", "未知")
+        nohk_node = res.get("active_nohk_node", "未知")
+        delay = res.get("delay_ms", "超时")
+        nohk_delay = res.get("delay_nohk_ms", "超时")
+        healthy = res.get("is_healthy", False)
+        conns = res.get("total_connections", 0)
+        status_str = "双通道全部正常畅通" if healthy else "检测到部分通道异常"
+        MessageBox(
+            "双通道链路深度诊断结果",
+            f"⚡ 全量出口 (常规/视频): {node}\n"
+            f"   延迟测定: {delay} ms\n\n"
+            f"⚡ 非港出口 (Gemini/反重力/AI): {nohk_node}\n"
+            f"   延迟测定: {nohk_delay} ms\n\n"
+            f"综合状态: {status_str}\n"
+            f"活跃连接: {conns} 条\n"
+            f"今日自愈: {res.get('healed_count', 0)} 次",
+            self
+        ).exec()
+
+    def _update_auto_heal_params(self):
+        pc = self.pipeline_card
+        try:
+            th = float(pc.auto_heal_threshold.text().strip())
+        except ValueError:
+            th = 3.5
+        try:
+            cd = float(pc.auto_heal_cooldown.text().strip()) * 60.0
+        except ValueError:
+            cd = 900.0
+        if hasattr(self.controller, "auto_heal_watcher"):
+            self.controller.auto_heal_watcher.update_config(
+                blackhole_timeout=th,
+                cooldown_duration=cd
+            )
+        self.controller.save_config({
+            "auto_heal_threshold": th,
+            "auto_heal_cooldown": cd / 60.0
+        })
+
+    def _on_tray_pref_changed(self, state: int):
+        enabled = bool(state == 2 or (hasattr(Qt, "CheckState") and state == Qt.CheckState.Checked.value) or bool(state))
+        self.controller.save_config({"minimize_to_tray_enabled": enabled})
+
     # ==================== 初始配置与历史回显 ====================
 
     def restore_ui_config(self, cfg: dict):
@@ -773,8 +942,39 @@ class MainWindow(QWidget):
 
         self._on_reconnect_clicked()
 
+        # 5. 恢复自愈与托盘设置
+        if "auto_heal_enabled" in cfg:
+            pc.chk_auto_heal.setChecked(bool(cfg["auto_heal_enabled"]))
+            self.controller.toggle_auto_heal(bool(cfg["auto_heal_enabled"]))
+        if "auto_heal_threshold" in cfg:
+            pc.auto_heal_threshold.setText(str(cfg["auto_heal_threshold"]))
+        if "auto_heal_cooldown" in cfg:
+            pc.auto_heal_cooldown.setText(str(cfg["auto_heal_cooldown"]))
+        if "minimize_to_tray_enabled" in cfg:
+            pc.chk_minimize_to_tray.setChecked(bool(cfg["minimize_to_tray_enabled"]))
+        self._update_auto_heal_params()
+
     def closeEvent(self, event):
-        # 窗口关闭前强制存盘
+        pc = self.pipeline_card
+        if (
+            hasattr(pc, "chk_minimize_to_tray")
+            and pc.chk_minimize_to_tray.isChecked()
+            and hasattr(self, "tray_icon")
+            and self.tray_icon.isVisible()
+        ):
+            event.ignore()
+            self.hide()
+            if not getattr(self, "_tray_balloon_shown", False):
+                self.tray_icon.showMessage(
+                    "Clash Verge 节点管理助手",
+                    "助手已最小化至系统托盘，后台保持秒级自愈与定时优选守护中...",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    3000
+                )
+                self._tray_balloon_shown = True
+            return
+
+        # 真正退出前强制存盘
         if hasattr(self, 'controller') and self.controller:
             self.controller.save_config(self.controller.state.get_snapshot())
             self.controller.log("💾 退出前已自动保存所有数据至 config...")

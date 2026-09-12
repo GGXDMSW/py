@@ -146,6 +146,7 @@ class FavPipelineWorker(QThread):
                     blacklist_reasons=self.controller.state.blacklist_reasons,
                     get_node_endpoint_fn=_get_ep,
                     is_asian_node_fn=is_asian_node,
+                    node_colo_dict=self.controller.state.node_colo,
                 )
 
                 for f in list(self.controller.state.favorites):
@@ -153,15 +154,18 @@ class FavPipelineWorker(QThread):
                     # 如果能在当前订阅中找到该物理端点对应的实体节点
                     matched_proxy = current_ep_to_proxy.get(target_ep)
                     if matched_proxy:
-                        if matched_proxy not in seen_targets and is_asian_node(matched_proxy):
+                        c_val = self.controller.state.node_colo.get(matched_proxy, self.controller.state.node_colo.get(target_ep, "-"))
+                        if matched_proxy not in seen_targets and is_asian_node(matched_proxy, colo=c_val):
                             active_fav_targets.append(matched_proxy)
                             seen_targets.add(matched_proxy)
                             fav_origin_map[matched_proxy] = f
-                    elif f in self.controller.state.all_nodes and is_asian_node(f):
-                        if f not in seen_targets:
-                            active_fav_targets.append(f)
-                            seen_targets.add(f)
-                            fav_origin_map[f] = f
+                    elif f in self.controller.state.all_nodes:
+                        c_val = self.controller.state.node_colo.get(f, self.controller.state.node_colo.get(target_ep, "-"))
+                        if is_asian_node(f, colo=c_val):
+                            if f not in seen_targets:
+                                active_fav_targets.append(f)
+                                seen_targets.add(f)
+                                fav_origin_map[f] = f
 
             tot = len(active_fav_targets)
             self.log_signal.emit(f"优质池待复测节点共 {tot} 个 (已穿透对齐 C 段端点 | 达标即停={early_stop_enabled})")
@@ -322,7 +326,8 @@ class FavPipelineWorker(QThread):
             nohk_candidates = []
             with self.controller.state.lock:
                 for n in temp_passed:
-                    if not is_asian_node(n):
+                    c_val = self.controller.state.node_colo.get(n, self.controller.state.node_colo.get(_get_ep(n), "-"))
+                    if not is_asian_node(n, colo=c_val):
                         self.controller.state.local_blacklist.add(n)
                         self.controller.state.favorites.discard(n)
                         self.controller.state.blacklist_reasons[n] = "非亚洲地区/命名"
@@ -599,6 +604,8 @@ class FavPipelineWorker(QThread):
                         star_group_tolerance=star_group_tolerance,
                         is_asian_node_fn=is_asian_node,
                         get_node_endpoint_fn=_get_ep,
+                        cloud_endpoints=self.controller.state.cloud_endpoints,
+                        node_colo=self.controller.state.node_colo,
                     )
                     write_script_js(script_code)
                     trigger_verge_reactivate_hotkey()
@@ -622,6 +629,8 @@ class FavPipelineWorker(QThread):
                 star_group_tolerance=star_group_tolerance,
                 is_asian_node_fn=is_asian_node,
                 get_node_endpoint_fn=_get_ep,
+                cloud_endpoints=self.controller.state.cloud_endpoints,
+                node_colo=self.controller.state.node_colo,
             )
             write_ok, write_res = write_script_js(script_code)
             if write_ok:

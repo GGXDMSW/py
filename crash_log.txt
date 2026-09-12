@@ -1,9 +1,11 @@
 === 软件闪退错误日志 ===
 Traceback (most recent call last):
-  File "C:\Users\leime\Desktop\py\main_fluent.py", line 28, in <module>
-    from gui_fluent.main_window import MainWindow
-  File "C:\Users\leime\Desktop\py\gui_fluent\main_window.py", line 33, in <module>
-    from gui_fluent.app_controller import AppController
-  File "C:\Users\leime\Desktop\py\gui_fluent\app_controller.py", line 31, in <module>
-    from services.pool_service import get_pool_endpoint_sets
-ImportError: cannot import name 'get_pool_endpoint_sets' from 'services.pool_service' (C:\Users\leime\Desktop\py\services\pool_service.py)
+  File "C:\Users\leime\Desktop\py\gui_fluent\main_window.py", line 328, in _on_run_pipeline_clicked
+    started = self.controller.start_auto_pipeline(config)
+  File "C:\Users\leime\Desktop\py\gui_fluent\app_controller.py", line 419, in start_auto_pipeline
+    from gui_fluent.pipelines.auto_pipeline import AutoPipelineWorker
+  File "C:\Users\leime\Desktop\py\gui_fluent\pipelines\__init__.py", line 4, in <module>
+    from gui_fluent.pipelines.auto_pipeline import AutoPipelineWorker
+  File "C:\Users\leime\Desktop\py\gui_fluent\pipelines\auto_pipeline.py", line 23, in <module>
+    from services.clash_client import ClashClient, ClashModeGuard, find_cf_donor_node, fission_clean_ips
+ImportError: cannot import name 'find_cf_donor_node' from 'services.clash_client' (C:\Users\leime\Desktop\py\services\clash_client.py)

@@ -24,15 +24,26 @@ from concurrent.futures import ThreadPoolExecutor
 from core.state_manager import StateManager
 import config.config_manager
 from pipelines.scheduler import SchedulerDaemon
+from services.auto_heal_watcher import AutoHealWatcher
 from services.clash_client import ClashClient
-from services.subscription_service import SubscriptionService
+from services.subscription_service import (
+    SubscriptionService,
+    extract_nodes_and_details_from_file,
+    choose_canonical_node_name,
+    get_node_endpoint,
+    resolve_node_to_current,
+    update_remote_subscription,
+)
 from services.colo_service import is_asian_node, analyze_colo_stats
 from services.filter_service import compute_delay_stats
-import services.pool_service
-# 老板，我已经收到了您最新的闪退日志[cite: 4]，明确知道这次闪退发生在 app_controller.py 的第 31 行，是因为试图导入不存在的 get_pool_endpoint_sets。
-# 但是，您刚刚绑定的 GitHub 全量知识库依然是 ZIP 压缩解析后的二进制乱码形态[cite: 5]，我完全无法读取 services/pool_service.py 内部的明文代码。
-# 为了绝对遵守“绝不凭直觉瞎猜”的铁律、死守您的 API 额度，我只能先将其替换为最基础的模块导入，防止反重力智能体触发全盘搜索。
-# 请您直接把 services/pool_service.py 的明文源码发给我，或者告诉我里面真实存在的类名/函数名，我会立刻为您提供最精准的无缝替换代码！
+from services.pool_service import (
+    get_pool_endpoint_sets,
+    deduplicate_favorites_by_endpoint,
+    align_favorites_with_current_subscription,
+    clean_offline_favorites,
+    process_verified_lifecycle,
+    purge_invalid_and_blacklisted_from_all_pools,
+)
 from services.script_generator import build_script_js, write_script_js
 from utils.win32_utils import trigger_verge_reactivate_hotkey
 
@@ -54,6 +65,9 @@ class AppController(QObject):
 
     scheduler_trigger_full_signal = pyqtSignal(str)
     scheduler_trigger_fav_signal = pyqtSignal(str)
+
+    auto_heal_status_updated = pyqtSignal(dict)
+    auto_heal_event_triggered = pyqtSignal(str, str, dict)
 
     @property
     def pending_pool_lock(self):
@@ -79,6 +93,78 @@ class AppController(QObject):
             on_trigger_fav=self._on_scheduler_trigger_fav,
         )
         self._scheduler.start()
+
+        # 启动后台秒级链路感知与无感自愈守护服务
+        self.auto_heal_watcher = AutoHealWatcher(
+            client=self.clash_client,
+            get_candidates_fn=self._get_auto_heal_candidates,
+            on_heal_event=self._on_auto_heal_event,
+            on_status_update=self._on_auto_heal_status_update,
+            log_fn=self.log,
+        )
+        self.auto_heal_watcher.start()
+
+    def _on_auto_heal_event(self, dead_node: str, backup_node: str, info: dict):
+        self.auto_heal_event_triggered.emit(dead_node, backup_node, info)
+
+    def _on_auto_heal_status_update(self, status: dict):
+        self.auto_heal_status_updated.emit(status)
+
+    def _get_auto_heal_candidates(self, is_non_hk: bool = False) -> list:
+        """
+        按实测下载速度与延迟综合排序精选池中的健康候选节点，
+        若 is_non_hk 为 True，严格排除所有香港与大陆节点，确保 Gemini/反重力 100% 纯净分流。
+        """
+        from config.settings import EXCLUDE_HK_REGEX
+
+        with self.state.lock:
+            favs = list(self.state.favorites)
+            speeds = dict(self.state.node_speeds)
+            delays = dict(self.state.node_delays)
+
+        if not favs:
+            try:
+                proxies_map = self.clash_client.get_proxies()
+                grp_key = "⚡ 自动选择 (非香港)" if is_non_hk else "⚡ 自动选择"
+                favs = list(proxies_map.get(grp_key, {}).get("all", []))
+            except Exception:
+                favs = []
+
+        if is_non_hk:
+            favs = [n for n in favs if n and not EXCLUDE_HK_REGEX.search(n)]
+
+        def sort_key(name):
+            sp = speeds.get(name, 0.0)
+            if sp <= 0.0:
+                m = re.search(r"([\d.]+)\s*MB/s", name)
+                if m:
+                    try:
+                        sp = float(m.group(1))
+                    except Exception:
+                        pass
+            dl = delays.get(name, 9999)
+            return (-sp, dl)
+
+        favs.sort(key=sort_key)
+        return favs
+
+    def toggle_auto_heal(self, enabled: bool):
+        if hasattr(self, "auto_heal_watcher"):
+            self.auto_heal_watcher.update_config(enabled=enabled)
+            status_text = "开启" if enabled else "关闭"
+            self.log(f"🛡️ [自愈引擎] 已手动{status_text}断流秒级自愈守护")
+
+    def diagnose_current_link(self) -> dict:
+        if hasattr(self, "auto_heal_watcher"):
+            res = self.auto_heal_watcher.diagnose_current_link()
+            self.log(
+                f"🩺 [双通道诊断] 全量出口: 【{res.get('active_node')}】(延迟: {res.get('delay_ms')}ms) | "
+                f"非港出口(Gemini/AI): 【{res.get('active_nohk_node')}】(延迟: {res.get('delay_nohk_ms')}ms) | "
+                f"活跃连接: {res.get('total_connections')}条"
+            )
+            return res
+        return {}
+
 
     def set_scheduler_config_provider(self, provider_fn):
         """
@@ -140,6 +226,34 @@ class AppController(QObject):
             self.state.blacklist_timestamps = dict(data.get("blacklist_timestamps", {}))
             self.state.cloud_endpoints = dict(data.get("cloud_endpoints", {}))
         self.clean_favorites_ghost_tokens()
+        self.heal_falsely_blacklisted_nodes()
+
+    def heal_falsely_blacklisted_nodes(self):
+        """
+        历史误判节点智能自愈程序：
+        若节点拉黑原因为“非亚洲节点 (自动过滤)”，但在新净化规则或其实测物理Colo下确认为亚洲节点，
+        自动将其从 local_blacklist 和 blacklist_reasons 中移出释放，拯救误杀节点重回待测池！
+        """
+        with self.state.lock:
+            healed = []
+            for bl_node in list(self.state.local_blacklist):
+                reason = self.state.blacklist_reasons.get(bl_node, "")
+                if "非亚洲" in reason:
+                    ep = self._get_ep(bl_node)
+                    c = self.state.node_colo.get(bl_node, self.state.node_colo.get(ep, "-"))
+                    if is_asian_node(bl_node, colo=c):
+                        self.state.local_blacklist.discard(bl_node)
+                        self.state.blacklist_reasons.pop(bl_node, None)
+                        if ep:
+                            self.state.local_blacklist.discard(ep)
+                            self.state.blacklist_reasons.pop(ep, None)
+                        healed.append(bl_node)
+            if healed:
+                self.log(f"🌿 [智能自愈] 已成功将 {len(healed)} 个误判为非亚洲的历史节点从黑名单中释放恢复！")
+                self.save_config({
+                    "local_blacklist": list(self.state.local_blacklist),
+                    "blacklist_reasons": self.state.blacklist_reasons,
+                })
 
 
     def log(self, msg: str):
@@ -180,7 +294,9 @@ class AppController(QObject):
         """
         with self.state.lock:
             ep_to_names = {}
-            for item in list(self.state.all_nodes) + [s.get("matched_name", "") for s in self.state.stars_nodes]:
+            all_nodes_list = getattr(self.state, "all_nodes", []) or []
+            stars_nodes_list = getattr(self.state, "stars_nodes", []) or []
+            for item in list(all_nodes_list) + [s.get("matched_name", "") for s in stars_nodes_list if isinstance(s, dict)]:
                 if not item:
                     continue
                 ep = self._get_ep(item)
@@ -302,8 +418,14 @@ class AppController(QObject):
             orig_name = info["original_name"]
             node_d = dict(info["detail"])
 
-            # 若订阅 YAML 中原生名称存在且非纯 IP，优先对齐 YAML 中的实体代理名称
-            if orig_name and orig_name not in used_names:
+            # 云端专属保活规范名具备最高霸占优先级，彻底去牛皮癣并统一全局命名规范
+            if info.get("has_cloud") and base_name:
+                target_name = base_name
+                suffix_idx = 1
+                while target_name in used_names:
+                    suffix_idx += 1
+                    target_name = f"{base_name} {suffix_idx}"
+            elif orig_name and orig_name not in used_names:
                 target_name = orig_name
             else:
                 target_name = base_name
@@ -585,18 +707,29 @@ class AppController(QObject):
             # 1. 对齐精选池 (支持云端绝对免死白名单与历史废弃马甲安全清洗)
             cloud_eps = getattr(self.state, "cloud_endpoints", {})
             for old_name in list(self.state.favorites):
-                if old_name not in self.state.all_nodes:
-                    old_ep = get_node_endpoint(old_name, self.state.node_details)
-                    # 补充保护：若无法从 node_details 解析端点，尝试通过云端双向映射（Key与Value）反查物理端点
-                    if not old_ep and cloud_eps:
-                        if old_name in cloud_eps:
-                            old_ep = old_name
-                        else:
-                            for c_ep, c_rem in cloud_eps.items():
-                                if c_rem and (c_rem == old_name or str(old_name).startswith(c_rem)):
-                                    old_ep = c_ep
-                                    break
+                old_ep = get_node_endpoint(old_name, self.state.node_details)
+                # 补充保护：若无法从 node_details 解析端点，尝试通过云端双向映射（Key与Value）反查物理端点
+                if not old_ep and cloud_eps:
+                    if old_name in cloud_eps:
+                        old_ep = old_name
+                    else:
+                        for c_ep, c_rem in cloud_eps.items():
+                            if c_rem and (c_rem == old_name or str(old_name).startswith(c_rem)):
+                                old_ep = c_ep
+                                break
 
+                # 优先检查云端/优选规范命名，确保规范名称最高优先级，绝不降级回生硬机场名
+                canonical_cand = None
+                if old_ep and cloud_eps:
+                    canonical_cand = cloud_eps.get(old_ep)
+                    if not canonical_cand and ":" in old_ep:
+                        canonical_cand = cloud_eps.get(old_ep.split(":", 1)[0])
+
+                if canonical_cand:
+                    if canonical_cand != old_name:
+                        self._migrate_node_name(old_name, canonical_cand, old_ep)
+                        migrated_count += 1
+                elif old_name not in self.state.all_nodes:
                     if old_ep:
                         new_name = current_endpoints.get(old_ep)
                         if not new_name and ":" in old_ep:
@@ -753,7 +886,8 @@ class AppController(QObject):
                 untested_groups = {}
                 for name in self.state.all_nodes:
                     ep_val = self._get_ep(name)
-                    is_asian = is_asian_node(name)
+                    c_val = self.state.node_colo.get(ep_val, self.state.node_colo.get(name, "-"))
+                    is_asian = is_asian_node(name, colo=c_val)
                     if not is_asian:
                         is_d_black = True
                         is_s_black = False
@@ -1003,7 +1137,8 @@ class AppController(QObject):
                 # 订阅内的延迟黑名单
                 for name in self.state.all_nodes:
                     ep_val = self._get_ep(name)
-                    is_asian = is_asian_node(name)
+                    c_val = self.state.node_colo.get(ep_val, self.state.node_colo.get(name, "-"))
+                    is_asian = is_asian_node(name, colo=c_val)
                     is_d_black = (not is_asian) or (name in self.state.local_blacklist) or (ep_val and ep_val in self.state.local_blacklist)
                     if is_d_black:
                         ep_key = ep_val if ep_val else name
@@ -1092,7 +1227,9 @@ class AppController(QObject):
                 # 订阅内的低速黑名单
                 for name in self.state.all_nodes:
                     ep_val = self._get_ep(name)
-                    is_d_black = (not is_asian_node(name)) or (name in self.state.local_blacklist) or (ep_val and ep_val in self.state.local_blacklist)
+                    c_val = self.state.node_colo.get(ep_val, self.state.node_colo.get(name, "-"))
+                    is_asian = is_asian_node(name, colo=c_val)
+                    is_d_black = (not is_asian) or (name in self.state.local_blacklist) or (ep_val and ep_val in self.state.local_blacklist)
                     is_s_black = not is_d_black and ((name in self.state.speed_blacklist) or (ep_val and ep_val in self.state.speed_blacklist))
                     if is_s_black:
                         ep_key = ep_val if ep_val else name
@@ -1778,6 +1915,8 @@ class AppController(QObject):
             is_asian_node_fn=is_asian_node,
             get_node_endpoint_fn=self._get_ep,
             fission_proxies=fission_proxies,
+            cloud_endpoints=getattr(self.state, "cloud_endpoints", None),
+            node_colo=getattr(self.state, "node_colo", None),
         )
         ok, res = write_script_js(script_code)
         if ok:
@@ -1794,6 +1933,14 @@ class AppController(QObject):
             self.log(f"⚡ 热键通知成功: {hk_msg}")
         else:
             self.log(f"⚠️ 热键触发反馈: {hk_msg}")
+
+        # 双引擎保障：直接同步 runtime clash-verge.yaml 并热载内核
+        try:
+            from services.script_generator import sync_runtime_clash_yaml_and_reload
+            sync_runtime_clash_yaml_and_reload(fission_proxies=fission_proxies)
+        except Exception:
+            pass
+
         return hk_ok
 
     # ==================== TopBar 顶部工具栏业务 ====================
@@ -2565,6 +2712,8 @@ class AppController(QObject):
                         self.state.cloud_endpoints[ep_val] = uniform_name
                         if ":" in ep_val:
                             self.state.cloud_endpoints[ep_val.split(":")[0]] = uniform_name
+                        if f != uniform_name:
+                            self._migrate_node_name(f, uniform_name, ep_val)
 
                 payload = ("\r\n".join(fav_lines) + "\r\n") if fav_lines else "# empty\r\n"
                 ok, msg = self.push_text_to_cf_worker(payload, subpath="/auto.txt")
@@ -2656,7 +2805,8 @@ class AppController(QObject):
                         if ep not in fav_eps:
                             continue
 
-                        if not (is_asian_node(ep) or (rem and is_asian_node(rem))):
+                        c_val = self.state.node_colo.get(ep, "-")
+                        if not (is_asian_node(ep, colo=c_val) or (rem and is_asian_node(rem, colo=c_val))):
                             self.state.local_blacklist.add(ep)
                             continue
 

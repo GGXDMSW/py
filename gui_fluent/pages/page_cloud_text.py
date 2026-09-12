@@ -146,6 +146,8 @@ class CloudTextCard(SimpleCardWidget):
         """切换加载状态"""
         self.btn_fetch.setEnabled(not is_loading)
         self.btn_push.setEnabled(not is_loading)
+        if hasattr(self, "btn_purge"):
+            self.btn_purge.setEnabled(not is_loading)
         if is_loading:
             self.btn_fetch.setText("⏳ 同步中...")
         else:
@@ -392,5 +394,6 @@ class PageCloudText(QWidget):
 
         import threading
         threading.Thread(target=_worker, daemon=True).start()
+
 
 

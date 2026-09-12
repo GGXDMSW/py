@@ -295,6 +295,9 @@ class ClashVergeTabsManager:
         return is_node_hongkong(node_name)
 
     def is_asian_node(self, node_name, colo=None):
+        if not colo:
+            ep = self.get_node_endpoint(node_name)
+            colo = self.node_colo.get(node_name, self.node_colo.get(ep, "-"))
         return is_asian_node(node_name, colo=colo)
 
     def auto_filter_and_blacklist_non_asia_nodes(self):
@@ -305,6 +308,7 @@ class ClashVergeTabsManager:
             self.blacklist_reasons,
             self.get_node_endpoint,
             self.is_asian_node,
+            node_colo_dict=self.node_colo,
         )
         if cnt > 0:
             self.save_persisted_config()
@@ -5176,6 +5180,8 @@ class ClashVergeTabsManager:
             is_asian_node_fn=self.is_asian_node,
             get_node_endpoint_fn=self.get_node_endpoint,
             resolve_node_to_current_fn=self.resolve_node_to_current,
+            cloud_endpoints=getattr(self, "cloud_endpoints", None),
+            node_colo=getattr(self, "node_colo", None),
         )
 
         ok, write_res = write_script_js(script_code)

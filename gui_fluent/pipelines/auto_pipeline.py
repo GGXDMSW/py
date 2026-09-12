@@ -19,7 +19,7 @@ else:
 
 from services.subscription_service import get_node_endpoint, choose_canonical_node_name
 from services.colo_service import is_asian_node, analyze_colo_stats, record_colo_sample
-from services.probe_service import get_cf_colo_raw, tcp_ping
+from services.probe_service import get_cf_colo_raw
 from services.clash_client import ClashClient, ClashModeGuard, find_cf_donor_node, fission_clean_ips
 from services.script_generator import build_script_js, write_script_js
 from services.pool_service import (
@@ -91,16 +91,16 @@ class AutoPipelineWorker(QThread):
     def run(self):
         self.log_signal.emit("🚀 启动一整套全自动大优选流程 (Fluent 后台线程)...")
         try:
-            # 0. 解析配置参数
+            # 0. 解析配置参数（严格依据 UI 面板设置决定初筛轮数与超时，严禁硬编码与截断）
             max_delay = int(self.config.get("max_delay", 100)) if str(self.config.get("max_delay", "")).isdigit() else 100
             try:
                 min_speed = float(self.config.get("min_speed", 5.0))
             except Exception:
                 min_speed = 5.0
-            # 极限淘汰制：严格初筛轮数为 2 轮
-            rounds = 2
-            raw_timeout = int(self.config.get("test_timeout", 500)) if str(self.config.get("test_timeout", "")).isdigit() else 500
-            timeout_ms = min(500, raw_timeout)
+
+            # 严格恢复按 UI 设置的轮数与超时（不再硬编码 rounds=2 与 500ms 超时）
+            rounds = max(1, int(self.config.get("test_rounds", 4))) if str(self.config.get("test_rounds", "")).isdigit() else 4
+            timeout_ms = max(200, int(self.config.get("test_timeout", 1500))) if str(self.config.get("test_timeout", "")).isdigit() else 1500
             try:
                 duration = max(0.5, float(self.config.get("speed_duration", 3.0)))
             except Exception:
@@ -191,6 +191,7 @@ class AutoPipelineWorker(QThread):
                     self.controller.state.blacklist_reasons,
                     _get_ep,
                     is_asian_node,
+                    node_colo_dict=self.controller.state.node_colo,
                 )
 
                 fav_eps, bl_eps, sbl_eps, star_eps = get_pool_endpoint_sets(
@@ -210,13 +211,14 @@ class AutoPipelineWorker(QThread):
                 ver_sk = 0
 
                 for n in self.controller.state.all_nodes:
-                    if not is_asian_node(n):
+                    ep = _get_ep(n)
+                    c_val = self.controller.state.node_colo.get(n, self.controller.state.node_colo.get(ep, "-"))
+                    if not is_asian_node(n, colo=c_val):
                         if n not in self.controller.state.local_blacklist:
                             self.controller.state.local_blacklist.add(n)
                             self.controller.state.blacklist_reasons[n] = "非亚洲节点 (自动过滤)"
                         continue
 
-                    ep = _get_ep(n)
                     if n in self.controller.state.local_blacklist or (ep and ep in self.controller.state.local_blacklist):
                         d_sk += 1
                         continue
@@ -228,7 +230,7 @@ class AutoPipelineWorker(QThread):
                     if n in self.controller.state.favorites or (ep and ep in fav_eps):
                         _should_purge = False
                         _purge_reason = ""
-                        if not is_asian_node(n):
+                        if not is_asian_node(n, colo=c_val):
                             _should_purge = True
                             _purge_reason = "非亚洲地区/命名"
                         else:
@@ -313,278 +315,204 @@ class AutoPipelineWorker(QThread):
             self.rows_updated.emit([dict(r) for r in test_rows])
             self.status_signal.emit(f"待测节点: {len(test_rows)} 个")
 
-            # 2. 并发延迟初筛 (两轮极限淘汰制 Fail-Fast，接入双轨测速分流)
-            self.log_signal.emit(f"⚡ 开始执行两轮极限淘汰制初筛 (全量待测端点共 {len(unique_eps)} 个，单次超时上限: {timeout_ms}ms)...")
+            # 2. 多轮真实代理延迟初筛 (严格按设置参数 rounds 与 timeout_ms 执行真实链路测试)
+            self.log_signal.emit(
+                f"⚡ 开始执行 {rounds} 轮真实代理延迟初筛 (独立端点共 {len(unique_eps)} 个，单次超时上限: {timeout_ms}ms)..."
+            )
+
+            # 建立物理端点 -> 内核代理节点映射表，确保 100% 真实代理应用层测速
+            core_proxies = self.controller.clash_client.get_proxies()
+            ep_to_core_node = {}
+            for p_name, p_info in core_proxies.items():
+                if isinstance(p_info, dict):
+                    s = p_info.get("server", "").strip()
+                    p = str(p_info.get("port", "443")).strip()
+                    if s:
+                        ep_to_core_node[f"{s}:{p}"] = p_name
 
             all_known_nodes = set(self.controller.state.all_nodes)
 
-            def _measure_endpoint_delay(endpoint: str, rep_node: str, t_ms: int) -> int:
-                """
-                双轨分流测速引擎：
-                1. 订阅已有实体代理节点：调用 Clash 内核 RESTful 接口执行真实链路测速；
-                2. pending.txt 等未入库裸端点：通过原生 Socket tcp_ping 进行真实 TCP SYN 握手探活；
-                彻底杜绝向 Clash 内核请求不存在的节点导致 404 秒级误杀！
-                """
-                # 轨道 A: 节点已在 Clash 订阅代理列表中
-                if rep_node in all_known_nodes:
-                    return self.controller.clash_client.query_proxy_delay(rep_node, test_url, timeout_ms=t_ms)
-
-                # 轨道 B: 裸端点（未在 Clash 代理树中注册）
-                target_host = endpoint
-                target_port = 443
-                if ":" in target_host:
-                    parts = target_host.split(":", 1)
-                    target_host = parts[0].strip()
-                    if parts[1].isdigit():
-                        target_port = int(parts[1])
-
-                timeout_sec = max(0.2, min(0.5, t_ms / 1000.0))
-                return tcp_ping(target_host, port=target_port, timeout=timeout_sec)
-
-            # ======================== 第 1 轮：全量普筛与极速淘汰 ========================
-            round1_survivors = []
-            survivor_lock = threading.Lock()
-            total_pending = len(unique_eps)
-            done_r1 = 0
-            last_log_emit = 0.0
-            last_status_emit = 0.0
-
-            def _test_round1(endpoint):
+            for r in range(1, rounds + 1):
                 if self.isInterruptionRequested():
-                    return
-                rep_node = choose_canonical_node_name(ep_to_untested[endpoint])
-                cur_delay = _measure_endpoint_delay(endpoint, rep_node, timeout_ms)
+                    break
 
-                # 淘汰判定 (Fail-Fast: 真实超时或延迟超标即刻出清)
-                if cur_delay >= 99999 or cur_delay > max_delay or cur_delay >= bl_delay_threshold:
-                    if cur_delay >= 99999:
-                        reason = "首轮初筛超时 (≥99999ms)"
-                    elif cur_delay >= bl_delay_threshold:
-                        reason = f"首轮延迟超标 ({cur_delay}ms ≥ {bl_delay_threshold}ms)"
+                total_eps = len(unique_eps)
+                done_cnt = 0
+                alive_cnt = 0
+                done_lock = threading.Lock()
+                last_log_t = 0.0
+                last_status_t = 0.0
+
+                def _single_delay(endpoint):
+                    if self.isInterruptionRequested():
+                        return
+                    rep_node = choose_canonical_node_name(ep_to_untested[endpoint])
+                    target_proxy_name = None
+                    if rep_node in core_proxies:
+                        target_proxy_name = rep_node
+                    elif rep_node in all_known_nodes and rep_node in core_proxies:
+                        target_proxy_name = rep_node
+                    elif endpoint in ep_to_core_node:
+                        target_proxy_name = ep_to_core_node[endpoint]
+
+                    if target_proxy_name:
+                        # 100% 真实代理链路测速：调用内核 RESTful API 发起真实 HTTP/HTTPS 延迟探测
+                        cur_delay = self.controller.clash_client.query_proxy_delay(target_proxy_name, test_url, timeout_ms=timeout_ms)
                     else:
-                        reason = f"首轮延迟淘汰 ({cur_delay}ms > {max_delay}ms)"
+                        # 纯正测速原则：严禁使用 TCP ping 降级伪造代理延迟！内核未挂载的端点直接判定超时
+                        cur_delay = 99999
 
-                    now_bl_t = time.time()
                     with self.controller.state.lock:
-                        self.controller.state.local_blacklist.add(rep_node)
-                        self.controller.state.favorites.discard(rep_node)
-                        self.controller.state.blacklist_reasons[rep_node] = reason
-                        self.controller.state.blacklist_timestamps[rep_node] = now_bl_t
-                        if endpoint:
-                            self.controller.state.local_blacklist.add(endpoint)
-                            self.controller.state.blacklist_reasons[endpoint] = reason
-                            self.controller.state.blacklist_timestamps[endpoint] = now_bl_t
-                        for same_n in ep_to_untested.get(endpoint, []):
-                            self.controller.state.local_blacklist.add(same_n)
-                            self.controller.state.favorites.discard(same_n)
-                            self.controller.state.blacklist_reasons[same_n] = reason
-                            self.controller.state.blacklist_timestamps[same_n] = now_bl_t
-                        if endpoint in self.controller.state.verified_nodes:
-                            del self.controller.state.verified_nodes[endpoint]
+                        if cur_delay < 99999:
+                            _record_delay_sample(self.controller.state.node_delay_history, endpoint, cur_delay)
+                        for n in ep_to_untested[endpoint]:
+                            self.controller.state.node_delays[n] = cur_delay
+                            hist = self.controller.state.node_history.setdefault(n, [])
+                            hist.append(cur_delay)
+                            self.controller.state.node_history[n] = hist[-rounds:]
+                            if cur_delay < 99999:
+                                _record_delay_sample(self.controller.state.node_delay_history, n, cur_delay)
 
                     row_ref = ep_to_row.get(endpoint)
                     if row_ref:
-                        row_ref["status"] = "首轮淘汰"
-                        row_ref["reason"] = reason
                         row_ref["delay"] = f"{cur_delay}ms" if cur_delay < 99999 else "超时"
-                else:
-                    # 首轮合格幸存
-                    with self.controller.state.lock:
-                        _record_delay_sample(self.controller.state.node_delay_history, rep_node, cur_delay, ep=endpoint)
-                        for n in ep_to_untested[endpoint]:
-                            self.controller.state.node_delays[n] = cur_delay
-                            hist = self.controller.state.node_history.setdefault(n, [])
-                            hist.append(cur_delay)
-                            self.controller.state.node_history[n] = hist[-2:]
+                        h_vals = self.controller.state.node_history.get(rep_node, [])
+                        row_ref["delay_hist"] = "/".join(str(v) if v < 99999 else "超时" for v in h_vals)
+                        valid_vals = [v for v in h_vals if v < 99999]
+                        if valid_vals:
+                            row_ref["avg_delay"] = f"{int(sum(valid_vals)/len(valid_vals))} ms"
 
-                    row_ref = ep_to_row.get(endpoint)
-                    if row_ref:
-                        row_ref["delay"] = f"{cur_delay}ms"
-                        row_ref["status"] = "首轮达标 (待复测)"
-                        row_ref["delay_hist"] = str(cur_delay)
+                    nonlocal done_cnt, alive_cnt, last_log_t, last_status_t
+                    with done_lock:
+                        done_cnt += 1
+                        if cur_delay < 99999:
+                            alive_cnt += 1
+                        now_t = time.time()
+                        # 每 50 个节点步长，或经过 1 秒，或最后一批时输出透明平滑进度
+                        step_cond = (done_cnt % 50 == 0) or (now_t - last_log_t >= 1.0) or (done_cnt == total_eps)
+                        if step_cond:
+                            last_log_t = now_t
+                            pct = int(done_cnt * 100 / total_eps)
+                            cur_d_str = f"{cur_delay}ms" if cur_delay < 99999 else "超时"
+                            self.log(
+                                f"⚡ [初筛第 {r}/{rounds} 轮] 进度: {done_cnt}/{total_eps} ({pct}%) | "
+                                f"实时存活: {alive_cnt} 个 | 最新端点: {endpoint} ({cur_d_str})"
+                            )
+                        if (now_t - last_status_t >= 0.5) or done_cnt == total_eps:
+                            last_status_t = now_t
+                            self.status_signal.emit(f"延迟初筛中: 第 {r}/{rounds} 轮 ({done_cnt}/{total_eps}) 存活:{alive_cnt}")
 
-                    with survivor_lock:
-                        round1_survivors.append(endpoint)
+                with ThreadPoolExecutor(max_workers=min(20, len(unique_eps))) as executor:
+                    list(executor.map(_single_delay, unique_eps))
 
-            # 并发严格压制在 max_workers = 40，防止 Windows 端口与 Socket 缓冲耗尽
-            with ThreadPoolExecutor(max_workers=min(40, len(unique_eps))) as executor:
-                futures_r1 = {executor.submit(_test_round1, ep): ep for ep in unique_eps}
-                for fut in as_completed(futures_r1):
-                    if self.isInterruptionRequested():
-                        break
-                    done_r1 += 1
-                    now_ts = time.time()
-
-                    # 时间戳节流心跳：每 1 秒输出一次控制台进度日志
-                    if (now_ts - last_log_emit >= 1.0) or done_r1 == total_pending:
-                        last_log_emit = now_ts
-                        with survivor_lock:
-                            s_cnt = len(round1_survivors)
-                        failed_cnt = done_r1 - s_cnt
-                        self.log(f"⚡ [初筛第1轮进度] {done_r1}/{total_pending} | 存活: {s_cnt} | 淘汰: {failed_cnt}")
-
-                    # 状态栏节流更新 (>= 0.5s)
-                    if (now_ts - last_status_emit >= 0.5) or done_r1 == total_pending:
-                        last_status_emit = now_ts
-                        with survivor_lock:
-                            s_cnt = len(round1_survivors)
-                        self.status_signal.emit(f"初筛第 1/2 轮 (全量淘汰): {done_r1}/{total_pending} [幸存 {s_cnt}]")
+                self.rows_updated.emit([dict(x) for x in test_rows])
+                if self.isInterruptionRequested():
+                    break
+                time.sleep(0.5)
 
             if self.isInterruptionRequested():
                 self.log("⏹ 用户已终止流水线任务")
                 self.finished_signal.emit(False, "任务已被用户手动终止")
                 return
 
-            self.log(f"🏁 [第1轮初筛完毕] 共生还 {len(round1_survivors)} 个节点，立即转入第 2 轮复筛...")
-
-            if not round1_survivors:
-                self.status_signal.emit("首轮全军覆没")
-                self.finished_signal.emit(True, f"延迟初筛结束：{total_pending} 个待测节点在首轮测试中全部超时或超标。")
-                return
-
-            # ======================== 第 2 轮：幸存者极限复测 ========================
-            round2_survivors = []
+            # 3. 达标排查与淘汰审计 (全部轮次完整跑完后，结合最佳延迟门槛、黑名单门槛与抖动机制综合审计)
             candidates = []
-            total_r2 = len(round1_survivors)
-            done_r2 = 0
-            last_log_emit_r2 = 0.0
-            last_status_emit_r2 = 0.0
-
-            def _test_round2(endpoint):
+            newly_delay_blacklisted = 0
+            for n in test_targets:
                 if self.isInterruptionRequested():
-                    return
-                ep = endpoint
-                rep_node = choose_canonical_node_name(ep_to_untested[endpoint])
-                cur_delay = _measure_endpoint_delay(endpoint, rep_node, timeout_ms)
+                    break
+                ep = _get_ep(n)
+                hist = self.controller.state.node_history.get(n, [])
+                best_delay = min(hist[-rounds:]) if hist else 99999
 
-                # 复测淘汰判定 (要求 100% 全通率)
-                if cur_delay >= 99999 or cur_delay > max_delay or cur_delay >= bl_delay_threshold:
-                    if cur_delay >= 99999:
-                        reason = "次轮复测超时波动 (≥99999ms)"
-                    elif cur_delay >= bl_delay_threshold:
-                        reason = f"次轮复测延迟超标 ({cur_delay}ms ≥ {bl_delay_threshold}ms)"
+                # 延迟未达到设定要求 (> max_delay) 或超时 (>= 99999) 或超标 (>= bl_delay_threshold) 淘汰拉黑
+                if best_delay > max_delay or best_delay >= bl_delay_threshold or best_delay >= 99999:
+                    if best_delay >= 99999:
+                        d_reason = "延迟超时 (≥99999ms)"
+                    elif best_delay >= bl_delay_threshold:
+                        d_reason = f"延迟超标 ({best_delay}ms ≥ {bl_delay_threshold}ms)"
                     else:
-                        reason = f"次轮复测超标 ({cur_delay}ms > {max_delay}ms)"
+                        d_reason = f"延迟淘汰 ({best_delay}ms > {max_delay}ms)"
 
                     now_bl_t = time.time()
                     with self.controller.state.lock:
-                        self.controller.state.local_blacklist.add(rep_node)
-                        self.controller.state.favorites.discard(rep_node)
-                        self.controller.state.blacklist_reasons[rep_node] = reason
-                        self.controller.state.blacklist_timestamps[rep_node] = now_bl_t
-                        if endpoint:
-                            self.controller.state.local_blacklist.add(endpoint)
-                            self.controller.state.blacklist_reasons[endpoint] = reason
-                            self.controller.state.blacklist_timestamps[endpoint] = now_bl_t
-                        for same_n in ep_to_untested.get(endpoint, []):
+                        self.controller.state.local_blacklist.add(n)
+                        self.controller.state.favorites.discard(n)
+                        self.controller.state.blacklist_reasons[n] = d_reason
+                        self.controller.state.blacklist_timestamps[n] = now_bl_t
+                        if ep:
+                            self.controller.state.local_blacklist.add(ep)
+                            self.controller.state.blacklist_reasons[ep] = d_reason
+                            self.controller.state.blacklist_timestamps[ep] = now_bl_t
+                        for same_n in ep_to_untested.get(ep, []):
                             self.controller.state.local_blacklist.add(same_n)
                             self.controller.state.favorites.discard(same_n)
-                            self.controller.state.blacklist_reasons[same_n] = reason
+                            self.controller.state.blacklist_reasons[same_n] = d_reason
                             self.controller.state.blacklist_timestamps[same_n] = now_bl_t
-                        if endpoint in self.controller.state.verified_nodes:
-                            del self.controller.state.verified_nodes[endpoint]
+                        if ep in self.controller.state.verified_nodes:
+                            del self.controller.state.verified_nodes[ep]
 
-                    row_ref = ep_to_row.get(endpoint)
-                    if row_ref:
-                        row_ref["status"] = "次轮淘汰"
-                        row_ref["reason"] = reason
-                        h_vals = self.controller.state.node_history.get(rep_node, [])
-                        row_ref["delay_hist"] = "/".join(str(v) if v < 99999 else "超时" for v in h_vals) + f"/{cur_delay if cur_delay < 99999 else '超时'}"
-                else:
-                    # 记录第 2 轮样本
+                    if ep in ep_to_row:
+                        ep_to_row[ep]["status"] = "延迟淘汰"
+                        ep_to_row[ep]["reason"] = d_reason
+
+                    newly_delay_blacklisted += 1
+                    continue
+
+                # 节点抖动拉黑机制：最低延迟≥设定值且向上抖动≥设定值，立即拉黑淘汰（最高延迟<设定最低延迟则豁免）
+                is_j_bad, j_min, j_up = check_node_jitter_blacklisted(
+                    hist[-rounds:], jitter_min_d, jitter_up_th
+                )
+                if is_j_bad:
+                    j_reason = f"延迟抖动淘汰 (底{j_min}ms 抖动+{j_up}ms)"
+                    now_bl_t = time.time()
                     with self.controller.state.lock:
-                        _record_delay_sample(self.controller.state.node_delay_history, rep_node, cur_delay, ep=endpoint)
-                        for n in ep_to_untested[endpoint]:
-                            self.controller.state.node_delays[n] = cur_delay
-                            hist = self.controller.state.node_history.setdefault(n, [])
-                            hist.append(cur_delay)
-                            self.controller.state.node_history[n] = hist[-2:]
+                        self.controller.state.local_blacklist.add(n)
+                        self.controller.state.favorites.discard(n)
+                        self.controller.state.blacklist_reasons[n] = j_reason
+                        self.controller.state.blacklist_timestamps[n] = now_bl_t
+                        if ep:
+                            self.controller.state.local_blacklist.add(ep)
+                            self.controller.state.blacklist_reasons[ep] = j_reason
+                            self.controller.state.blacklist_timestamps[ep] = now_bl_t
+                        for same_n in ep_to_untested.get(ep, []):
+                            self.controller.state.local_blacklist.add(same_n)
+                            self.controller.state.favorites.discard(same_n)
+                            self.controller.state.blacklist_reasons[same_n] = j_reason
+                            self.controller.state.blacklist_timestamps[same_n] = now_bl_t
+                        if ep in self.controller.state.verified_nodes:
+                            del self.controller.state.verified_nodes[ep]
 
-                    # 抖动判定
-                    hist = self.controller.state.node_history.get(rep_node, [])
-                    is_j_bad, j_min, j_up = check_node_jitter_blacklisted(hist[-2:], jitter_min_d, jitter_up_th)
-                    if is_j_bad:
-                        j_reason = f"延迟抖动淘汰 (底{j_min}ms 抖动+{j_up}ms)"
-                        now_bl_t = time.time()
-                        with self.controller.state.lock:
-                            self.controller.state.local_blacklist.add(rep_node)
-                            self.controller.state.favorites.discard(rep_node)
-                            self.controller.state.blacklist_reasons[rep_node] = j_reason
-                            self.controller.state.blacklist_timestamps[rep_node] = now_bl_t
-                            if endpoint:
-                                self.controller.state.local_blacklist.add(endpoint)
-                                self.controller.state.blacklist_reasons[ep] = j_reason
-                                self.controller.state.blacklist_timestamps[ep] = now_bl_t
-                            for same_n in ep_to_untested.get(endpoint, []):
-                                self.controller.state.local_blacklist.add(same_n)
-                                self.controller.state.favorites.discard(same_n)
-                                self.controller.state.blacklist_reasons[same_n] = j_reason
-                                self.controller.state.blacklist_timestamps[same_n] = now_bl_t
-                            if endpoint in self.controller.state.verified_nodes:
-                                del self.controller.state.verified_nodes[endpoint]
+                    if ep in ep_to_row:
+                        ep_to_row[ep]["status"] = "抖动淘汰"
+                        ep_to_row[ep]["reason"] = j_reason
 
-                        row_ref = ep_to_row.get(endpoint)
-                        if row_ref:
-                            row_ref["status"] = "抖动淘汰"
-                            row_ref["reason"] = j_reason
-                    else:
-                        # 双轮全通，准入合格
-                        cur_avg, hist_avg = compute_delay_stats(
-                            rep_node,
-                            ep=endpoint,
-                            node_history=self.controller.state.node_history,
-                            node_delays=self.controller.state.node_delays,
-                            node_delay_history=self.controller.state.node_delay_history,
-                            get_node_endpoint_fn=_get_ep,
-                        )
-                        row_ref = ep_to_row.get(endpoint)
-                        if row_ref:
-                            row_ref["status"] = "初筛合格"
-                            row_ref["reason"] = f"双轮全通 (均值 {cur_avg})"
-                            row_ref["avg_delay"] = cur_avg
-                            row_ref["hist_avg"] = hist_avg
-                            h_vals = self.controller.state.node_history.get(rep_node, [])
-                            row_ref["delay_hist"] = "/".join(str(v) if v < 99999 else "超时" for v in h_vals)
+                    newly_delay_blacklisted += 1
+                    self.log(f"【抖动淘汰】节点 {n} 最低延迟 {j_min}ms (≥{jitter_min_d}ms)，向上抖动 +{j_up}ms (≥{jitter_up_th}ms)，拉黑淘汰！")
+                    continue
 
-                        with survivor_lock:
-                            round2_survivors.append(endpoint)
-                            candidates.append(rep_node)
+                cur_avg, hist_avg = compute_delay_stats(
+                    n,
+                    ep=ep,
+                    node_history=self.controller.state.node_history,
+                    node_delays=self.controller.state.node_delays,
+                    node_delay_history=self.controller.state.node_delay_history,
+                    get_node_endpoint_fn=_get_ep,
+                )
+                if ep in ep_to_row:
+                    ep_to_row[ep]["status"] = "初筛达标"
+                    ep_to_row[ep]["reason"] = f"延迟达标 ({best_delay}ms ≤ {max_delay}ms)"
+                    ep_to_row[ep]["avg_delay"] = cur_avg
+                    ep_to_row[ep]["hist_avg"] = hist_avg
 
-            # 并发严格压制在 max_workers = 40
-            with ThreadPoolExecutor(max_workers=min(40, len(round1_survivors))) as executor:
-                futures_r2 = {executor.submit(_test_round2, ep): ep for ep in round1_survivors}
-                for fut in as_completed(futures_r2):
-                    if self.isInterruptionRequested():
-                        break
-                    done_r2 += 1
-                    now_ts = time.time()
-
-                    # 时间戳节流心跳：每 1 秒输出一次控制台进度日志
-                    if (now_ts - last_log_emit_r2 >= 1.0) or done_r2 == total_r2:
-                        last_log_emit_r2 = now_ts
-                        with survivor_lock:
-                            s_cnt = len(candidates)
-                        failed_cnt = done_r2 - s_cnt
-                        self.log(f"⚡ [复测第2轮进度] {done_r2}/{total_r2} | 存活: {s_cnt} | 淘汰: {failed_cnt}")
-
-                    # 状态栏节流更新 (>= 0.5s)
-                    if (now_ts - last_status_emit_r2 >= 0.5) or done_r2 == total_r2:
-                        last_status_emit_r2 = now_ts
-                        with survivor_lock:
-                            s_cnt = len(candidates)
-                        self.status_signal.emit(f"初筛第 2/2 轮 (极限复测): {done_r2}/{total_r2} [合格 {s_cnt}]")
-
-            if self.isInterruptionRequested():
-                self.log("⏹ 用户已终止流水线任务")
-                self.finished_signal.emit(False, "任务已被用户手动终止")
-                return
+                candidates.append(n)
 
             self.log(
-                f"🏁 [第2轮复筛完毕] 最终晋级 {len(candidates)} 个高质节点，立即转入 Colo 测定与测速..."
+                f"🏁 [延迟初筛完毕] 共 {len(candidates)} 个候选节点达标 (≤{max_delay}ms，淘汰超标/抖动: {newly_delay_blacklisted} 个)，立即转入真实 Colo 测定与测速..."
             )
 
-            # 仅保留通过双轮考核合格的端点行，单次通知 UI 表格装配
-            surviving_eps = set(round2_survivors)
+            # 仅保留通过延迟考核合格的端点行，单次通知 UI 表格装配
+            surviving_eps = { _get_ep(c) for c in candidates if _get_ep(c) }
             test_rows = [r for r in test_rows if r.get("endpoint") in surviving_eps]
             ep_to_row = { r["endpoint"]: r for r in test_rows if "endpoint" in r }
             self.rows_updated.emit([dict(x) for x in test_rows])
@@ -592,7 +520,7 @@ class AutoPipelineWorker(QThread):
 
             if not candidates:
                 self.status_signal.emit("无达标节点")
-                self.finished_signal.emit(True, "延迟初筛结束：所有节点均未能通过两轮极限淘汰考核。")
+                self.finished_signal.emit(True, f"延迟初筛结束：所有待测节点延迟均未达到 ≤{max_delay}ms。")
                 return
 
             # 3. 真实 Colo 测定与防漂移审计 (Step 3/4)
@@ -761,6 +689,7 @@ class AutoPipelineWorker(QThread):
                         if row_ref:
                             row_ref["status"] = f"带宽测速中 [{idx}/{total_cand}]"
                             self.rows_updated.emit([dict(r) for r in test_rows])
+                        self.log(f"🌐 [真实带宽测速 {idx}/{total_cand}] 正在测试节点真实下行: {node_name} (采样 {duration}s)...")
 
                         if ep in tested_endpoint_speeds:
                             speed_val = tested_endpoint_speeds[ep]
@@ -848,11 +777,15 @@ class AutoPipelineWorker(QThread):
 
                         if speed_val >= min_speed and is_asian_node(node_name, colo=colo):
                             coronated_name = f"{colo} {speed_val:.2f} MB/s"
-                            premium_nodes.append(node_name)
+                            fav_target_name = coronated_name if coronated_name else node_name
+                            premium_nodes.append(fav_target_name)
                             with self.controller.state.lock:
-                                self.controller.state.favorites.add(node_name)
-                                d_val = self.controller.state.node_delays.get(node_name, 0)
-                                self.controller.state.fav_reasons[node_name] = f"真实测速达标 ({speed_val:.2f}MB/s)"
+                                self.controller.state.favorites.add(fav_target_name)
+                                if node_name != fav_target_name:
+                                    self.controller.state.favorites.discard(node_name)
+                                    self.controller._migrate_node_name(node_name, fav_target_name, ep)
+                                d_val = self.controller.state.node_delays.get(fav_target_name, self.controller.state.node_delays.get(node_name, 0))
+                                self.controller.state.fav_reasons[fav_target_name] = f"真实测速达标 ({speed_val:.2f}MB/s)"
                                 if ep:
                                     self.controller.state.cloud_endpoints[ep] = coronated_name
                                     if ":" in ep:
@@ -863,8 +796,8 @@ class AutoPipelineWorker(QThread):
                                 row_ref["status"] = "优质精选"
                                 row_ref["reason"] = f"下行 {speed_val:.2f} MB/s ≥ {min_speed} MB/s"
 
-                            self.log_signal.emit(f"⭐ 节点入选精选: {coronated_name} ({ep}) (下行: {speed_val:.2f} MB/s)")
-                            test_rows = [r for r in test_rows if r.get("endpoint") != ep and r.get("name") != node_name]
+                            self.log_signal.emit(f"⭐ [优质入选] 节点入选精选: {coronated_name} ({ep}) (实测下行: {speed_val:.2f} MB/s ≥ {min_speed} MB/s)")
+                            test_rows = [r for r in test_rows if r.get("endpoint") != ep and r.get("name") not in (node_name, fav_target_name)]
                             self.rows_updated.emit([dict(r) for r in test_rows])
                             self.controller.data_changed.emit()
 
@@ -892,9 +825,12 @@ class AutoPipelineWorker(QThread):
                                 if ep in self.controller.state.verified_nodes:
                                     del self.controller.state.verified_nodes[ep]
 
-                            newly_speed_blacklisted += 1
+                            if row_ref:
+                                row_ref["status"] = "低速淘汰"
+                                row_ref["reason"] = spd_reason
 
-                            self.log_signal.emit(f"【低速淘汰】节点 {node_name} 速度 {speed_val:.2f} MB/s 未达标 (≥{min_speed} MB/s)")
+                            newly_speed_blacklisted += 1
+                            self.log_signal.emit(f"【低速淘汰】节点 {node_name} 实测下行 {speed_val:.2f} MB/s 未达标 (门槛 ≥{min_speed} MB/s)")
                             test_rows = [r for r in test_rows if r.get("endpoint") != ep and r.get("name") != node_name]
                             self.rows_updated.emit([dict(r) for r in test_rows])
                             self.controller.data_changed.emit()
@@ -963,6 +899,8 @@ class AutoPipelineWorker(QThread):
                 star_group_tolerance=star_group_tolerance,
                 is_asian_node_fn=is_asian_node,
                 get_node_endpoint_fn=_get_ep,
+                cloud_endpoints=self.controller.state.cloud_endpoints,
+                node_colo=self.controller.state.node_colo,
             )
             write_ok, write_res = write_script_js(script_code)
             if write_ok:

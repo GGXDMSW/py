@@ -105,20 +105,61 @@ def check_node_jitter_blacklisted(
     return False, min_d, up_jitter
 
 
-def auto_filter_and_blacklist_non_asia_nodes(all_nodes, local_blacklist, favorites, blacklist_reasons, get_node_endpoint_fn, is_asian_node_fn):
+def auto_filter_and_blacklist_non_asia_nodes(
+    all_nodes,
+    local_blacklist,
+    favorites,
+    blacklist_reasons,
+    get_node_endpoint_fn,
+    is_asian_node_fn,
+    node_colo_dict=None,
+):
     """
-    执行非亚洲节点全量排查与自动拉黑：
+    执行非亚洲节点全量排查与自动拉黑，并对历史误伤节点执行智能自愈：
+    1. 自愈扫描：对 local_blacklist 中因“非亚洲”原因被拉黑的节点重新审计，若新规则或实测物理Colo确认为亚洲节点，自动从黑名单中移出释放！
+    2. 增量排查：基于物理机房最高真理原则与净化词库排查待测池。
     返回: (filtered_count: int, blacklisted_names: list[str])
     """
+    def _lookup_colo(key):
+        if not node_colo_dict or not key:
+            return None
+        c = node_colo_dict.get(key)
+        if not c or c == "-":
+            ep = get_node_endpoint_fn(key) if get_node_endpoint_fn else None
+            if ep:
+                c = node_colo_dict.get(ep)
+        return c if (c and c != "-") else None
+
+    def _eval_is_asian(name):
+        c = _lookup_colo(name)
+        try:
+            return is_asian_node_fn(name, colo=c)
+        except TypeError:
+            return is_asian_node_fn(name)
+
+    # 0. 智能自愈：自动释放曾因 "非亚洲" 被误杀的合法亚洲节点
+    for bl_node in list(local_blacklist):
+        reason = blacklist_reasons.get(bl_node, "")
+        if "非亚洲" in reason:
+            if _eval_is_asian(bl_node):
+                local_blacklist.discard(bl_node)
+                blacklist_reasons.pop(bl_node, None)
+                if get_node_endpoint_fn:
+                    ep = get_node_endpoint_fn(bl_node)
+                    if ep:
+                        local_blacklist.discard(ep)
+                        blacklist_reasons.pop(ep, None)
+
+    # 1. 增量排查与拉黑
     newly_blacklisted = []
     for n in all_nodes:
-        if not is_asian_node_fn(n):
+        if not _eval_is_asian(n):
             if n not in local_blacklist:
                 local_blacklist.add(n)
                 favorites.discard(n)
                 reason = "非亚洲节点 (自动过滤)"
                 blacklist_reasons[n] = reason
-                ep = get_node_endpoint_fn(n)
+                ep = get_node_endpoint_fn(n) if get_node_endpoint_fn else None
                 if ep:
                     local_blacklist.add(ep)
                     blacklist_reasons[ep] = reason

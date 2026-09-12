@@ -77,19 +77,21 @@ NON_ASIA_CN_KEYWORDS = [
     "新西兰", "奥克兰", "惠灵顿",
     # 非洲与其他
     "南非", "约翰内斯堡", "开普敦", "埃及", "尼日利亚", "肯尼亚",
-    "多哥", "汤加", "斐济", "巴拿马",
+    "多哥共和国", "非洲多哥", "汤加王国", "大洋洲汤加", "斐济", "巴拿马",
 ]
 
 # 严格非亚洲国家与机场三字码 (独立大写单词匹配)
+# 注意：已彻底剔除容易与英文介词、代词、TG缩写发生灾难性碰撞的2字母代码 (如 TG=Telegram, TO=to, IS=is, AT=at, IT=IT科技/it, NO=No.)，
+# 统一采用国际标准化组织 ISO 3字母代码 (TGO, TON, ISL, AUT, ITA, NOR)，消除全部语义误杀！
 NON_ASIA_CODE_SET = {
     "US", "USA", "CA", "CAN", "MX", "MEX", "BR", "BRA", "AR", "ARG", "CL", "CHL",
     "DE", "DEU", "GB", "GBR", "UK", "FR", "FRA", "NL", "NLD", "RU", "RUS",
-    "CH", "CHE", "SE", "SWE", "NO", "NOR", "FI", "FIN", "DK", "DNK",
-    "IT", "ITA", "ES", "ESP", "IE", "IRL", "PL", "POL", "AT", "AUT",
+    "CH", "CHE", "SE", "SWE", "NOR", "FI", "FIN", "DK", "DNK",
+    "ITA", "ES", "ESP", "IE", "IRL", "PL", "POL", "AUT",
     "BE", "BEL", "CZ", "CZE", "RO", "ROU", "UA", "UKR", "GR", "GRC",
-    "PT", "PRT", "HU", "HUN", "BG", "BGR", "IS", "ISL", "LU", "LUX",
-    "AU", "AUS", "NZ", "NZL", "ZA", "ZAF", "TG", "TO", "FJ", "PA",
-    "LAX", "SJC", "SFO", "SEA", "ORD", "DFW", "JFK", "EWR", "IAD", "ATL", "MIA", "PHX", "PDX", "LAS",
+    "PT", "PRT", "HU", "HUN", "BG", "BGR", "ISL", "LU", "LUX",
+    "AU", "AUS", "NZ", "NZL", "ZA", "ZAF", "TGO", "TON", "FJ", "PA",
+    "LAX", "SJC", "SFO", "SEA", "ORD", "DFW", "JFK", "EWR", "IAD", "ATL", "PHX", "PDX", "LAS",
     "YYZ", "YVR", "YUL", "LHR", "MAN", "CDG", "AMS", "FRA", "MUC", "BER", "ZRH", "GVA",
     "ARN", "OSL", "HEL", "CPH", "MXP", "FCO", "MAD", "BCN", "DUB", "WAW", "VIE", "BRU",
     "SVO", "DME", "LED", "SYD", "MEL", "BNE", "PER", "AKL", "GRU", "EZE", "JNB", "CPT",

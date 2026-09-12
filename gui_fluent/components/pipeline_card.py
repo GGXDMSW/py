@@ -347,6 +347,54 @@ class PipelineCard(QWidget):
 
         layout.addLayout(row5)
 
+        # ──────── 第 6 行：链路秒级自愈与托盘常驻 ────────
+        row6 = QHBoxLayout()
+        row6.setContentsMargins(0, 0, 0, 0)
+        row6.setSpacing(8)
+
+        lbl_heal = BodyLabel("🛡️ 链路秒级自愈:", self)
+        lbl_heal.setStyleSheet("color: #34d399; font-weight: bold;")
+        row6.addWidget(lbl_heal)
+
+        self.chk_auto_heal = CheckBox("启用断流秒级无感自愈", self)
+        self.chk_auto_heal.setObjectName("chk_auto_heal")
+        self.chk_auto_heal.setChecked(True)
+        row6.addWidget(self.chk_auto_heal)
+
+        row6.addWidget(CaptionLabel("黑洞阈值(s):", self))
+        self.auto_heal_threshold = LineEdit(self)
+        self.auto_heal_threshold.setObjectName("auto_heal_threshold")
+        self.auto_heal_threshold.setText("2.0")
+        self.auto_heal_threshold.setFixedWidth(40)
+        self.auto_heal_threshold.setAlignment(Qt.AlignCenter)
+        row6.addWidget(self.auto_heal_threshold)
+
+        row6.addWidget(CaptionLabel("熔断隔离(分):", self))
+        self.auto_heal_cooldown = LineEdit(self)
+        self.auto_heal_cooldown.setObjectName("auto_heal_cooldown")
+        self.auto_heal_cooldown.setText("15")
+        self.auto_heal_cooldown.setFixedWidth(36)
+        self.auto_heal_cooldown.setAlignment(Qt.AlignCenter)
+        row6.addWidget(self.auto_heal_cooldown)
+
+        self.chk_minimize_to_tray = CheckBox("关闭窗口时最小化至托盘静默守护", self)
+        self.chk_minimize_to_tray.setObjectName("chk_minimize_to_tray")
+        self.chk_minimize_to_tray.setChecked(True)
+        row6.addWidget(self.chk_minimize_to_tray)
+
+        self.btn_diagnose_link = PushButton("⚡ 诊断当前链路", self)
+        self.btn_diagnose_link.setObjectName("btn_diagnose_link")
+        row6.addWidget(self.btn_diagnose_link)
+
+        row6.addStretch(1)
+
+        self.lbl_auto_heal_status = CaptionLabel("🟢 链路守卫中 (今日自愈: 0 次)", self)
+        self.lbl_auto_heal_status.setObjectName("lbl_auto_heal_status")
+        self.lbl_auto_heal_status.setStyleSheet("color: #34d399; font-weight: bold;")
+        row6.addWidget(self.lbl_auto_heal_status)
+
+        layout.addLayout(row6)
+
         self.setStyleSheet("""
             PipelineCard {
                 background-color: rgba(30, 34, 50, 0.6);

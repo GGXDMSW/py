@@ -1,7 +1,70 @@
-import os
 import json
-import threading
+import os
 import shutil
+import threading
+
+
+def atomic_save_config(filepath, config_dict):
+    """
+    原子化持久保存配置字典：
+    1. 先写入临时文件 .tmp 并刷新磁盘
+    2. 校验文件写入完整无损
+    3. 保留原文件为 .bak 作为灾备
+    4. 执行原子重命名覆盖，杜绝断电/中断导致文件损坏清零
+    """
+    try:
+        dir_name = os.path.dirname(filepath)
+        if dir_name and not os.path.exists(dir_name):
+            os.makedirs(dir_name, exist_ok=True)
+
+        tmp_path = filepath + ".tmp"
+        bak_path = filepath + ".bak"
+
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(config_dict, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+
+        if os.path.exists(filepath):
+            try:
+                shutil.copyfile(filepath, bak_path)
+            except Exception:
+                pass
+
+        os.replace(tmp_path, filepath)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def safe_load_config(filepath):
+    """
+    安全读取配置文件，若主配置损坏则自动从 .bak 灾备副本中无缝自愈恢复
+    """
+    if not os.path.exists(filepath):
+        bak_path = filepath + ".bak"
+        if os.path.exists(bak_path):
+            filepath = bak_path
+        else:
+            return {}
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        bak_path = filepath + ".bak"
+        if os.path.exists(bak_path):
+            try:
+                with open(bak_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+            except Exception:
+                pass
+    return {}
+
 
 class ConfigManager:
     _instance = None
@@ -22,34 +85,13 @@ class ConfigManager:
 
     def load_config(self):
         with self.file_lock:
-            try:
-                if os.path.exists(self.config_path):
-                    with open(self.config_path, "r", encoding="utf-8") as f:
-                        self.config_data = json.load(f)
-                else:
-                    self.config_data = {}
-            except Exception as e:
-                print(f"读取配置文件异常，已使用空配置兜底: {e}")
-                self.config_data = {}
+            self.config_data = safe_load_config(self.config_path)
 
     def save_config(self, new_data=None):
         if new_data is not None:
             self.config_data.update(new_data)
-        
         with self.file_lock:
-            temp_path = self.config_path + ".tmp"
-            try:
-                with open(temp_path, "w", encoding="utf-8") as f:
-                    json.dump(self.config_data, f, indent=4, ensure_ascii=False)
-                # 原子替换，防止写入一半断电导致配置丢失为 0KB
-                os.replace(temp_path, self.config_path)
-            except Exception as e:
-                print(f"配置文件安全写入失败，已拦截异常: {e}")
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except OSError:
-                        pass
+            atomic_save_config(self.config_path, self.config_data)
 
     def get(self, key, default=None):
         with self.file_lock:
@@ -59,14 +101,3 @@ class ConfigManager:
         with self.file_lock:
             self.config_data[key] = value
             self.save_config()
-
-def safe_load_config(path):
-    """安全加载 JSON 配置文件，异常时返回空字典兜底"""
-    import os, json
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
