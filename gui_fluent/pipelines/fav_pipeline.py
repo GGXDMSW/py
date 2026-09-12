@@ -369,6 +369,7 @@ class FavPipelineWorker(QThread):
             qualified_nohk = []
             tested_ep_speeds = {}
             orig_group_selections = {}
+            google_hk_detected_nodes = set()
 
             fav_mode_guard = ClashModeGuard(self.controller.clash_client, temporary_mode="global")
             fav_mode_guard.__enter__()
@@ -424,7 +425,7 @@ class FavPipelineWorker(QThread):
 
                     time.sleep(0.15)
 
-                    # 非香港赛道专属：Google 送中洁净度感知防御 (一票否决)
+                    # 非香港赛道专属：Google 送中洁净度感知探测 (打标分流，不粗暴判 0)
                     if track_label == "非香港":
                         try:
                             g_req = urllib.request.Request(
@@ -434,10 +435,10 @@ class FavPipelineWorker(QThread):
                             with speed_opener.open(g_req, timeout=2.5) as g_resp:
                                 final_gurl = g_resp.geturl()
                                 if "google.com.hk" in final_gurl:
+                                    google_hk_detected_nodes.add(n)
                                     self.log_signal.emit(
-                                        f"❌ 【Google送中一票否决】非港节点 {n} 被 Google 重定向至香港 ({final_gurl})，破坏 Gemini / IDE 合规，直接淘汰！"
+                                        f"🏷️ [Google送中打标] 节点 {n} 遭重定向至 {final_gurl}，将打上 [送中] 标并转入常规优选组！"
                                     )
-                                    return 0.0
                         except Exception:
                             pass
 
@@ -521,15 +522,36 @@ class FavPipelineWorker(QThread):
                         break
                     spd = _test_single_speed(n, "非香港", len(qualified_nohk), target_nohk)
                     if spd >= f_min_s:
-                        qualified_nohk.append(n)
                         cur_d = self.controller.state.node_delays.get(n, 0)
-                        self.controller.state.fav_reasons[n] = f"复测考核留任 ({cur_d}ms / {spd:.2f}MB/s)"
-                        with self.controller.state.lock:
-                            orig_f = fav_origin_map.get(n, n)
-                            if orig_f != n:
-                                self.controller._migrate_node_name(orig_f, n, _get_ep(n))
-                            self.controller.state.favorites.add(n)
-                        self.controller.data_changed.emit()
+                        if n in google_hk_detected_nodes:
+                            # 打上 [送中] 标签并更名
+                            if "[送中]" not in n:
+                                m = re.search(r"([\d.]+\s*MB/s)", n)
+                                target_name = f"{n[:m.start()]}[送中] {n[m.start():]}" if m else f"{n} [送中]"
+                            else:
+                                target_name = n
+
+                            with self.controller.state.lock:
+                                orig_f = fav_origin_map.get(n, n)
+                                if orig_f != target_name:
+                                    self.controller._migrate_node_name(orig_f, target_name, _get_ep(n))
+                                self.controller.state.favorites.add(target_name)
+                                self.controller.state.fav_reasons[target_name] = f"Google送中打标留任常规组 ({cur_d}ms / {spd:.2f}MB/s)"
+                                self.controller.state.node_speeds[target_name] = spd
+                                self.controller.state.node_delays[target_name] = cur_d
+                            self.controller.data_changed.emit()
+                            self.log_signal.emit(f"✅ 节点 【{target_name}】 达标留任！由于带有 [送中] 标记，将自动服务于【常规自动组】，不占用非港名额。")
+                            # 注意：不加入 qualified_nohk，让非香港队列继续测试其他纯净节点，直到凑齐 target_nohk
+                        else:
+                            # 纯净非香港节点，正常进入非香港配额
+                            qualified_nohk.append(n)
+                            self.controller.state.fav_reasons[n] = f"复测考核留任 ({cur_d}ms / {spd:.2f}MB/s)"
+                            with self.controller.state.lock:
+                                orig_f = fav_origin_map.get(n, n)
+                                if orig_f != n:
+                                    self.controller._migrate_node_name(orig_f, n, _get_ep(n))
+                                self.controller.state.favorites.add(n)
+                            self.controller.data_changed.emit()
                     else:
                         spd_reason = "下行测速中断/失败" if spd < 0 else f"复测下行淘汰 ({spd:.2f} < {f_min_s} MB/s)"
                         with self.controller.state.lock:

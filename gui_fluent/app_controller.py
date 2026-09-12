@@ -2636,12 +2636,15 @@ class AppController(QObject):
                 d = self.state.node_delays.get(n, self.state.node_delays.get(ep, 0))
                 reason = self.state.fav_reasons.get(n, self.state.fav_reasons.get(ep, ""))
 
+                is_sz = ("[送中]" in n) or ("[送中]" in ep) or ("[送中]" in reason)
+                sz_tag = " [送中]" if is_sz and "[送中]" not in colo else ""
+
                 if spd and spd > 0.1:
-                    remark = f"{colo} {spd:.2f} MB/s"
+                    remark = f"{colo}{sz_tag} {spd:.2f} MB/s"
                 elif "C段" in reason:
-                    remark = f"{colo} [C段挖掘]"
+                    remark = f"{colo}{sz_tag} [C段挖掘]"
                 else:
-                    remark = colo
+                    remark = f"{colo}{sz_tag}"
                 lines.append(f"{ep}#{remark}")
 
         if not lines:

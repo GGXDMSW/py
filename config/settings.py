@@ -50,8 +50,11 @@ THEME = {
     "log_bg": "#0f111a",
 }
 
-# 香港与中国大陆特征排除规则 (严格过滤香港与大陆，保留台湾省 TW)
-EXCLUDE_HK_REGEX = re.compile(r"(香港|HK|Hong\s*Kong|HongKong|中国(?!\s*台湾)|大陆|回国|\bCN\b)", re.IGNORECASE)
+# 香港与中国大陆特征排除规则 (严格过滤香港与大陆，保留台湾省 TW，排除 Google 送中节点)
+EXCLUDE_HK_REGEX = re.compile(
+    r"(香港|HK|Hong\s*Kong|HongKong|中国(?!\s*台湾)|大陆|回国|\bCN\b|送中)",
+    re.IGNORECASE
+)
 
 # 严格非亚洲中文关键词（包含各大洲主要国家与城市）
 NON_ASIA_CN_KEYWORDS = [

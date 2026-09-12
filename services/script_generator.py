@@ -256,8 +256,8 @@ def build_script_js(
 {formatted_star_eps}
   ];
 
-  // 香港与中国大陆特征排除规则 (严格过滤香港与大陆，保留台湾省 TW)
-  const excludeRegex = /(香港|HK|Hong\\s*Kong|HongKong|中国(?!\\s*台湾)|大陆|回国|\\bCN\\b)/i;
+  // 香港与中国大陆特征排除规则 (严格过滤香港与大陆，保留台湾省 TW，排除 Google 送中)
+  const excludeRegex = /(香港|HK|Hong\\s*Kong|HongKong|中国(?!\\s*台湾)|大陆|回国|\\bCN\\b|送中)/i;
 
   const allProxies = config.proxies || [];
 
