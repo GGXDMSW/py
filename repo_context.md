@@ -11891,7 +11891,7 @@ class AutoHealWatcher:
         self.conn_snapshots: Dict[str, dict] = {}  # {conn_id: {"up": int, "down": int, "ts": float, "stall_since": float}}
         self.probe_urls: List[str] = [
             "https://www.google.com/generate_204",
-            "https://cp.cloudflare.com/generate_204",
+            "https://www.gstatic.com/generate_204",
         ]
         self.probe_url: str = self.probe_urls[0]
 
@@ -12148,7 +12148,7 @@ class AutoHealWatcher:
         self.current_active_nohk_node = group_current_nodes.get("⚡ 自动选择 (非香港)", "未知非港出口")
 
         # 2. 读取当前活跃连接快照
-        conns_data = self.client.get_connections(timeout=0.8)
+        conns_data = self.client.get_connections(timeout=1.5)
         if not conns_data or not isinstance(conns_data, dict):
             return
 
@@ -12418,8 +12418,8 @@ class AutoHealWatcher:
     def _proactive_heartbeat_worker(self):
         """
         后台异步主动心跳巡检双保险流水线：
-        周期性轻量化探测各受监控策略组当前在用节点的可用性，
-        若检测到物理暴毙（超时 >= 99999ms），立即触发自愈切换。
+        周期性轻量化双探针竞速探测各受监控策略组当前在用节点的可用性，
+        若检测到物理暴毙（超时 >= 99999ms），抓取坏死连接并立即触发自愈切换。
         """
         try:
             for grp in self.monitored_groups:
@@ -12428,14 +12428,37 @@ class AutoHealWatcher:
                 if not c_node:
                     continue
 
-                d = self.client.query_proxy_delay(c_node, self.probe_url, timeout_ms=self.probe_timeout_ms)
+                # (a) 双探针竞速探测
+                d = 99999
+                for u in self.probe_urls:
+                    cur_d = self.client.query_proxy_delay(c_node, u, timeout_ms=self.probe_timeout_ms)
+                    if cur_d < d:
+                        d = cur_d
+                    if d < self.degrade_rtt_ms:
+                        break
+
                 if d >= 99999:
+                    # (b) 确认物理暴毙，主动从内核抓取当前所有活跃连接，提取挂在该坏死节点上的连接 ID
+                    dead_cids = []
+                    try:
+                        conns_data = self.client.get_connections(timeout=1.2)
+                        if conns_data and isinstance(conns_data, dict):
+                            for conn in conns_data.get("connections", []):
+                                chains = conn.get("chains", [])
+                                if c_node in chains or (chains and chains[0] == c_node):
+                                    cid = conn.get("id")
+                                    if cid:
+                                        dead_cids.append(cid)
+                    except Exception:
+                        dead_cids = []
+
+                    # (c) 传入 dead_conn_ids 立即并发清退，触发客户端瞬间重连
                     is_non_hk = ("非香港" in grp)
                     self._execute_auto_heal(
                         target_group=grp,
                         dead_node=c_node,
                         reason=f"【{grp}】主动心跳探针探测超时(>{self.probe_timeout_ms}ms物理断流)",
-                        dead_conn_ids=[],
+                        dead_conn_ids=dead_cids,
                         is_non_hk=is_non_hk,
                     )
         except Exception as e:
@@ -12533,28 +12556,55 @@ class AutoHealWatcher:
     def _refresh_standby_cache(self, proxies_map: Optional[dict] = None):
         """
         在后台心跳中预先计算并缓存各策略组的顺位热备节点 (Pre-warmed Standby)，
-        发生断流瞬间 0 延迟直接取用，无需临时排序与过滤。
+        100% 以内核策略组真实 all 成员为唯一权威事实源，彻底消灭 HTTP 400 切换脱节。
         """
         now = time.time()
         for grp in self.monitored_groups:
             is_non_hk = ("非香港" in grp)
-            candidates: List[str] = []
+
+            # (a) 100% 以内核该策略组的真实成员为权威基准
+            all_members: List[str] = []
+            if proxies_map and grp in proxies_map:
+                all_members = list(proxies_map.get(grp, {}).get("all", []))
+            if not all_members:
+                g_data = self.client.get_proxy(grp, timeout=0.8)
+                all_members = list(g_data.get("all", []))
+
+            if not all_members:
+                continue
+
+            # (b) 区域合规过滤
+            if is_non_hk:
+                valid_members = [c for c in all_members if c and not EXCLUDE_HK_REGEX.search(c)]
+            else:
+                valid_members = [c for c in all_members if c]
+
+            if not valid_members:
+                continue
+
+            # (d) 智能排序算法：从节点名正则提取速度，结合 get_candidates_fn 建立权重映射
+            fav_cands: List[str] = []
             if callable(self.get_candidates_fn):
                 try:
-                    candidates = self.get_candidates_fn(is_non_hk=is_non_hk) or []
+                    fav_cands = self.get_candidates_fn(is_non_hk=is_non_hk) or []
                 except TypeError:
-                    candidates = self.get_candidates_fn() or []
-            if not candidates:
-                if proxies_map and grp in proxies_map:
-                    candidates = list(proxies_map.get(grp, {}).get("all", []))
-                else:
-                    g_data = self.client.get_proxy(grp, timeout=0.8)
-                    candidates = list(g_data.get("all", []))
-            if is_non_hk:
-                candidates = [c for c in candidates if c and not EXCLUDE_HK_REGEX.search(c)]
-            # 过滤掉当前处于 15 分钟熔断期的节点
-            ready_cands = [c for c in candidates if c and (c not in self.cooldown_nodes or self.cooldown_nodes[c] <= now)]
-            self.standby_cache[grp] = ready_cands
+                    fav_cands = self.get_candidates_fn() or []
+                except Exception:
+                    fav_cands = []
+
+            fav_rank = {name: idx for idx, name in enumerate(fav_cands)}
+
+            def _sort_key(name: str):
+                m = re.search(r"([\d.]+)\s*MB/s", name, re.IGNORECASE)
+                sp = float(m.group(1)) if m else 0.0
+                rank = fav_rank.get(name, 9999)
+                return (-sp, rank, name)
+
+            sorted_members = sorted(valid_members, key=_sort_key)
+
+            # (e) 过滤掉当前处于 15 分钟熔断冷冻期的节点，若全在冷却期则保留有效成员兜底
+            ready_cands = [c for c in sorted_members if (c not in self.cooldown_nodes or self.cooldown_nodes[c] <= now)]
+            self.standby_cache[grp] = ready_cands or sorted_members
 
     def _pick_backup_node(
         self,
@@ -12562,39 +12612,63 @@ class AutoHealWatcher:
         exclude_node: str,
         is_non_hk: bool = False,
     ) -> Optional[str]:
-        # 1. 优先直接从内存热备队列中瞬时取出首个非死节点 (0 毫秒开销)
+        """
+        以内核当前策略组的真实成员为唯一事实基准，挑选最佳顺位备选节点 (消灭 400 脱节)
+        """
+        now = time.time()
+
+        # 1. 优先直接从内存热备队列中取出首个非死且真实存在的未冷冻节点 (0 毫秒开销)
         cached = self.standby_cache.get(target_group, [])
         for cand in cached:
-            if cand and cand != exclude_node:
+            if cand and cand != exclude_node and (cand not in self.cooldown_nodes or self.cooldown_nodes[cand] <= now):
                 return cand
 
-        # 2. 若热备缓存恰好为空，回退执行全量提取
-        candidates: List[str] = []
+        # 2. 若热备缓存未命中，实时以内核该策略组真实成员为权威基准提取
+        g_data = self.client.get_proxy(target_group, timeout=1.0)
+        all_members = list(g_data.get("all", []))
+        if not all_members:
+            return None
+
+        # (b) 区域合规过滤
+        if is_non_hk:
+            valid_members = [c for c in all_members if c and not EXCLUDE_HK_REGEX.search(c)]
+        else:
+            valid_members = [c for c in all_members if c]
+
+        # (c) 排除当前坏死节点
+        candidates = [c for c in valid_members if c != exclude_node]
+        if not candidates:
+            return None
+
+        # (d) 智能排序算法：正则提取下行速度并结合 get_candidates_fn 排序
+        fav_cands: List[str] = []
         if callable(self.get_candidates_fn):
             try:
-                candidates = self.get_candidates_fn(is_non_hk=is_non_hk) or []
+                fav_cands = self.get_candidates_fn(is_non_hk=is_non_hk) or []
             except TypeError:
-                candidates = self.get_candidates_fn() or []
+                fav_cands = self.get_candidates_fn() or []
+            except Exception:
+                fav_cands = []
 
-        if not candidates:
-            g_data = self.client.get_proxy(target_group, timeout=1.0)
-            candidates = list(g_data.get("all", []))
+        fav_rank = {name: idx for idx, name in enumerate(fav_cands)}
 
-        if is_non_hk:
-            candidates = [c for c in candidates if c and not EXCLUDE_HK_REGEX.search(c)]
+        def _sort_key(name: str):
+            m = re.search(r"([\d.]+)\s*MB/s", name, re.IGNORECASE)
+            sp = float(m.group(1)) if m else 0.0
+            rank = fav_rank.get(name, 9999)
+            return (-sp, rank, name)
 
-        now = time.time()
+        candidates.sort(key=_sort_key)
+
+        # (e) 优先返回未在 15 分钟熔断冷冻期的顶级节点
         for cand in candidates:
-            if not cand or cand == exclude_node:
-                continue
-            if cand in self.cooldown_nodes and self.cooldown_nodes[cand] > now:
-                continue
+            if cand not in self.cooldown_nodes or self.cooldown_nodes[cand] <= now:
+                return cand
+
+        # (e 兜底) 若全部处于冷却期，返回除 exclude_node 之外评分最高的有效成员兜底
+        for cand in candidates:
             return cand
 
-        # 若都在冷却期，选择任一不同的健康候选兜底
-        for cand in candidates:
-            if cand and cand != exclude_node:
-                return cand
         return None
 
     def _notify_status(self):
