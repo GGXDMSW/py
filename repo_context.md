@@ -5493,6 +5493,9 @@ class MainWindow(QWidget):
         self._init_system_tray()
         self._bind_auto_heal_signals()
 
+        # 11. 绑定全界面控件实时编辑自动存盘
+        self._bind_auto_save_signals()
+
     def init_layout_structure(self):
         """
         构建主窗体自上而下的整体布局结构：
@@ -6110,6 +6113,7 @@ class MainWindow(QWidget):
 
     def _force_quit(self):
         if hasattr(self, 'controller') and self.controller:
+            self.save_all_ui_settings()
             self.controller.save_config(self.controller.state.get_snapshot())
             self.controller.log("💾 正在退出并保存所有状态...")
         QApplication.quit()
@@ -6209,7 +6213,174 @@ class MainWindow(QWidget):
         enabled = bool(state == 2 or (hasattr(Qt, "CheckState") and state == Qt.CheckState.Checked.value) or bool(state))
         self.controller.save_config({"minimize_to_tray_enabled": enabled})
 
-    # ==================== 初始配置与历史回显 ====================
+    # ==================== 界面配置自动采集、实时持久化与记忆回显 ====================
+
+    def collect_all_ui_config(self) -> dict:
+        """
+        全面采集主界面所有输入框、复选框、调度与订阅的最新设置字典
+        """
+        pc = getattr(self, "pipeline_card", None)
+        pf = getattr(self, "page_favorites", None)
+        pv = getattr(self, "page_verified", None)
+        cfg = {}
+
+        if pc:
+            cfg.update({
+                "max_delay": pc.max_delay.text().strip(),
+                "min_speed": pc.min_speed.text().strip(),
+                "target_count": pc.target_count.text().strip(),
+                "test_rounds": pc.test_rounds.text().strip(),
+                "test_timeout": pc.test_timeout.text().strip(),
+                "speed_duration": pc.speed_duration.text().strip(),
+                "blacklist_threshold": pc.blacklist_threshold.text().strip(),
+                "speed_bl_threshold": pc.speed_bl_threshold.text().strip(),
+                "speed_bl_rounds": pc.speed_bl_rounds.text().strip(),
+                "jitter_min_delay": pc.jitter_min_delay.text().strip(),
+                "jitter_up_threshold": pc.jitter_up_threshold.text().strip(),
+                "test_url": pc.test_url.text().strip(),
+                "speed_url": pc.speed_url.text().strip(),
+                "schedule_enabled": pc.chk_schedule.isChecked(),
+                "schedule_interval": pc.schedule_interval.text().strip(),
+                "schedule_times": pc.schedule_times.text().strip(),
+                "group_interval": pc.group_interval.text().strip(),
+                "group_tolerance": pc.group_tolerance.text().strip(),
+                "star_group_interval": pc.star_group_interval.text().strip(),
+                "star_group_tolerance": pc.star_group_tolerance.text().strip(),
+                "cf_worker_enabled": getattr(pc, "chk_worker_enabled", None) and pc.chk_worker_enabled.isChecked(),
+                "worker_url": pc.worker_url.text().strip(),
+                "worker_token": pc.worker_token.text().strip(),
+                "clash_port": pc.clash_port.text().strip(),
+                "clash_secret": pc.clash_secret.text().strip(),
+                "auto_heal_enabled": pc.chk_auto_heal.isChecked(),
+                "auto_heal_threshold": pc.auto_heal_threshold.text().strip(),
+                "auto_heal_cooldown": pc.auto_heal_cooldown.text().strip(),
+                "minimize_to_tray_enabled": pc.chk_minimize_to_tray.isChecked(),
+            })
+
+        if pf:
+            cfg.update({
+                "fav_max_delay": pf.fav_max_delay.text().strip(),
+                "fav_min_speed": pf.fav_min_speed.text().strip(),
+                "fav_rounds": pf.fav_rounds.text().strip(),
+                "fav_speed_duration": pf.fav_speed_duration.text().strip(),
+                "fav_jitter_min_delay": pf.fav_jitter_min.text().strip(),
+                "fav_jitter_up_threshold": pf.fav_jitter_up.text().strip(),
+                "fav_schedule_enabled": pf.chk_fav_schedule.isChecked(),
+                "fav_schedule_interval": pf.fav_sched_interval.text().strip(),
+                "fav_target_hk_count": pf.fav_target_hk.text().strip(),
+                "fav_target_nohk_count": pf.fav_target_nohk.text().strip(),
+                "fav_quota_early_stop": pf.chk_fav_early_stop.isChecked(),
+                "fav_fallback_enabled": pf.chk_fav_fallback.isChecked(),
+            })
+
+        if pv:
+            cfg.update({
+                "incubate_hours": pv.incubate_hours.text().strip(),
+                "incubate_passes": pv.incubate_passes.text().strip(),
+            })
+
+        if hasattr(self, "top_bar") and hasattr(self.top_bar, "sub_combo"):
+            current_sub = self.top_bar.sub_combo.currentText().strip()
+            if current_sub:
+                cfg["last_selected_yaml"] = current_sub
+                cfg["active_profile"] = current_sub
+
+        return cfg
+
+    def save_all_ui_settings(self):
+        """
+        统一存盘调度：采集所有控件数据并原子化持久化到磁盘
+        """
+        if hasattr(self, "controller") and self.controller:
+            ui_cfg = self.collect_all_ui_config()
+            self.controller.save_config(ui_cfg)
+
+    def _bind_auto_save_signals(self):
+        """
+        为所有参数输入框 (editingFinished)、复选框 (stateChanged) 及订阅切换绑定静默实时自动存盘
+        """
+        pc = getattr(self, "pipeline_card", None)
+        pf = getattr(self, "page_favorites", None)
+        pv = getattr(self, "page_verified", None)
+
+        if pc:
+            pc_line_edits = [
+                getattr(pc, "max_delay", None),
+                getattr(pc, "min_speed", None),
+                getattr(pc, "target_count", None),
+                getattr(pc, "test_rounds", None),
+                getattr(pc, "test_timeout", None),
+                getattr(pc, "speed_duration", None),
+                getattr(pc, "blacklist_threshold", None),
+                getattr(pc, "speed_bl_threshold", None),
+                getattr(pc, "speed_bl_rounds", None),
+                getattr(pc, "jitter_min_delay", None),
+                getattr(pc, "jitter_up_threshold", None),
+                getattr(pc, "test_url", None),
+                getattr(pc, "speed_url", None),
+                getattr(pc, "schedule_interval", None),
+                getattr(pc, "schedule_times", None),
+                getattr(pc, "group_interval", None),
+                getattr(pc, "group_tolerance", None),
+                getattr(pc, "star_group_interval", None),
+                getattr(pc, "star_group_tolerance", None),
+                getattr(pc, "worker_url", None),
+                getattr(pc, "worker_token", None),
+                getattr(pc, "clash_port", None),
+                getattr(pc, "clash_secret", None),
+                getattr(pc, "auto_heal_threshold", None),
+                getattr(pc, "auto_heal_cooldown", None),
+            ]
+            for le in pc_line_edits:
+                if le and hasattr(le, "editingFinished"):
+                    le.editingFinished.connect(self.save_all_ui_settings)
+
+            pc_checkboxes = [
+                getattr(pc, "chk_schedule", None),
+                getattr(pc, "chk_worker_enabled", None),
+                getattr(pc, "chk_auto_heal", None),
+                getattr(pc, "chk_minimize_to_tray", None),
+            ]
+            for cb in pc_checkboxes:
+                if cb and hasattr(cb, "stateChanged"):
+                    cb.stateChanged.connect(lambda _st=None: self.save_all_ui_settings())
+
+        if pf:
+            pf_line_edits = [
+                getattr(pf, "fav_max_delay", None),
+                getattr(pf, "fav_min_speed", None),
+                getattr(pf, "fav_rounds", None),
+                getattr(pf, "fav_speed_duration", None),
+                getattr(pf, "fav_jitter_min", None),
+                getattr(pf, "fav_jitter_up", None),
+                getattr(pf, "fav_sched_interval", None),
+                getattr(pf, "fav_target_hk", None),
+                getattr(pf, "fav_target_nohk", None),
+            ]
+            for le in pf_line_edits:
+                if le and hasattr(le, "editingFinished"):
+                    le.editingFinished.connect(self.save_all_ui_settings)
+
+            pf_checkboxes = [
+                getattr(pf, "chk_fav_schedule", None),
+                getattr(pf, "chk_fav_early_stop", None),
+                getattr(pf, "chk_fav_fallback", None),
+            ]
+            for cb in pf_checkboxes:
+                if cb and hasattr(cb, "stateChanged"):
+                    cb.stateChanged.connect(lambda _st=None: self.save_all_ui_settings())
+
+        if pv:
+            pv_line_edits = [
+                getattr(pv, "incubate_hours", None),
+                getattr(pv, "incubate_passes", None),
+            ]
+            for le in pv_line_edits:
+                if le and hasattr(le, "editingFinished"):
+                    le.editingFinished.connect(self.save_all_ui_settings)
+
+        if hasattr(self, "top_bar") and hasattr(self.top_bar, "sub_combo"):
+            self.top_bar.sub_combo.currentTextChanged.connect(lambda _txt=None: self.save_all_ui_settings())
 
     def restore_ui_config(self, cfg: dict):
         """
@@ -6260,6 +6431,8 @@ class MainWindow(QWidget):
             pc.star_group_interval.setText(str(cfg["star_group_interval"]))
         if "star_group_tolerance" in cfg:
             pc.star_group_tolerance.setText(str(cfg["star_group_tolerance"]))
+        if "cf_worker_enabled" in cfg and hasattr(pc, "chk_worker_enabled"):
+            pc.chk_worker_enabled.setChecked(bool(cfg["cf_worker_enabled"]))
 
         worker_url_val = cfg.get("worker_url") or cfg.get("cf_worker_url", "")
         if worker_url_val:
@@ -6312,12 +6485,14 @@ class MainWindow(QWidget):
             port_val = "9097"
         pc.clash_port.setText(str(port_val))
 
-        # 4. 强制默认订阅选择并触发加载
-        active_sub = "Rw0nNFlVIbnA.yaml"
+        # 4. 订阅选择与触发加载 (优先记忆上次选中的 profile/yaml)
+        saved_sub = cfg.get("last_selected_yaml") or cfg.get("active_profile") or "Rw0nNFlVIbnA.yaml"
         all_items = [self.top_bar.sub_combo.itemText(i) for i in range(self.top_bar.sub_combo.count())]
-        if active_sub in all_items:
+        active_sub = saved_sub if saved_sub in all_items else (all_items[0] if all_items else "")
+        if active_sub:
             self.top_bar.sub_combo.setCurrentText(active_sub)
             self.controller.load_nodes_from_profile(active_sub)
+            setattr(self.controller.state, "active_profile", active_sub)
             self.controller.data_changed.emit()
 
         self._on_reconnect_clicked()
@@ -6356,6 +6531,7 @@ class MainWindow(QWidget):
 
         # 真正退出前强制存盘
         if hasattr(self, 'controller') and self.controller:
+            self.save_all_ui_settings()
             self.controller.save_config(self.controller.state.get_snapshot())
             self.controller.log("💾 退出前已自动保存所有数据至 config...")
         super().closeEvent(event)
