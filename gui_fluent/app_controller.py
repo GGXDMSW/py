@@ -3136,7 +3136,9 @@ class AppController(QObject):
 
         cfg = self.load_config()
         test_url = cfg.get("test_url", "https://www.google.com/generate_204")
-        speed_url = cfg.get("speed_url", "https://speed.cloudflare.com/__down?bytes=50000000")
+        speed_url = cfg.get("speed_url", "https://dl.google.com/android/repository/platform-tools_r34.0.5-windows.zip")
+        if not speed_url or "speed.cloudflare.com" in speed_url:
+            speed_url = "https://dl.google.com/android/repository/platform-tools_r34.0.5-windows.zip"
 
         def _worker():
             self.log(f"开始测试 {len(testable)} 个典藏节点 (模式: {mode})...")

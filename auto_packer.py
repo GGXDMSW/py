@@ -1,7 +1,8 @@
 import os
 
 def is_ignored(path):
-    ignored_dirs = {'.git', '__pycache__', '.idea', '.vscode', 'venv', 'env', 'node_modules', 'dist', 'build', 'gui', 'scratch'}
+    # 忽略非工程源码目录
+    ignored_dirs = {'.git', '__pycache__', '.idea', '.vscode', 'venv', 'env', 'node_modules', 'dist', 'build', 'scratch'}
     ignored_exts = {'.pyc', '.pyd', '.exe', '.dll', '.so', '.dylib', '.png', '.jpg', '.jpeg', '.gif', '.zip', '.tar', '.gz', '.ico', '.pdf', '.bak', '.json', '.txt', '.log'}
     
     parts = os.path.normpath(path).split(os.sep)
@@ -20,6 +21,7 @@ def is_ignored(path):
 DIR_ANNOTATIONS = {
     'config': '全局静态配置与持久化管理器 (Settings & ConfigManager)',
     'core': '全局核心状态机与跨线程事件总线 (StateManager & SignalBus)',
+    'gui': '[经典兼容] 原生 Tkinter 经典版多标签页管理界面 (历史单体工程全量归档)',
     'gui_fluent': '现代 Fluent Design 风格桌面 UI 前端体系',
     'gui_fluent/components': 'UI 结构性卡片与基础组件 (TopBar, BottomBar, LogPanel, etc.)',
     'gui_fluent/pages': '各功能业务独立子页面 (Active, Favorites, Stars, Blacklists, etc.)',
@@ -31,13 +33,16 @@ DIR_ANNOTATIONS = {
 }
 
 FILE_ANNOTATIONS = {
+    '.gitignore': 'Git 版本控制忽略配置文件',
     'AGENTS.md': '全局规则定义与 Bark 自动化通知指令',
     'auto_packer.py': '全局大地图与源码打包发布器（生成 repo_context.md）',
-    'gemini-code-1788793285196.py': '单文件完整归档实现（历史原型与算法参考实现）',
-    'main.py': '原生/经典 GUI 入口启动器（包含环境自检与引导）',
-    'main_fluent.py': '现代 PyQt6 Fluent Design 桌面应用主启动入口',
+    'gemini-code-1788793285196.py': '单文件历史兼容启动代理层（无缝转发调用 main.py）',
+    'main.py': '经典版 GUI 原生 Tkinter 启动入口（构建并运行 ClashVergeTabsManager）',
+    'main_fluent.py': '现代 PyQt6 Fluent Design 桌面应用主流启动入口（构建并运行 MainWindow）',
     'temp_runner.js': '历史 Script.js 脚本测试运行样本',
     '代码审查报告.md': '系统工程代码审查与重构规划报告',
+    'gui/__init__.py': '经典版 Tkinter 界面包声明',
+    'gui/app.py': '经典版 ClashVergeTabsManager 6500+行全功能单体界面与历史算法全量实现',
     'config/__init__.py': '配置模块包声明',
     'config/config_manager.py': 'node_assistant_config.json 线程安全持久化读写与原子写盘',
     'config/settings.py': '全局静态配置、默认参数、主题样式、测速常量与正则排除规则',
@@ -129,18 +134,23 @@ GOD_VIEW_MAP_TEMPLATE = """# 🌌 反重力平台 py 项目「绝对上帝视角
 本系统是一套专为 **Clash Verge Rev** 量身打造的高性能、自动化节点优选、全链路状态守护与秒级无感自愈中枢。整体遵循 **分层解耦、单向依赖、Controller中枢编排、双引擎热重载** 的企业级工程架构。
 
 ### 核心能力矩阵：
-1. **真实下行带宽多线程并发压测**：基于微探针与真实测速文件分段下载，摒弃虚假 ICMP/TCP Ping 延迟，测定真实网络吞吐能力（MB/s）。
+1. **真实下行带宽多线程并发压测**：基于微探针与真实测速文件分段下载（严禁使用 Cloudflare 链接，统一使用 Google 官方分发包），摒弃虚假 ICMP/TCP Ping 延迟，测定真实网络吞吐能力（MB/s）。
 2. **Cloudflare 物理机房嗅探与防漂移**：并发嗅探端点真实机房（如 HKG、NRT、SIN、SJC），记录 7 天历史记录，精准剔除跨境漂移节点，确保落地合规。
 3. **物理端点去重与全生命周期规范更名**：以 `IP:Port` 物理端点为核心键，对混乱的机场营销名称进行清洗，永久固化统一命名（如 `香港 HKG 22.56 MB/s`）。
 4. **秒级无感断流自愈守护 (AutoHealWatcher)**：后台 1.0s 旁路轮询连接表，毫秒级发现单向发包黑洞（tx>0, rx==0）与软失速，自动顺位无感切换节点并熔断坏死连接。
 5. **Google 429 验证码/人机拦截与香港送中主动合规探针**：双重检测 Google 阻断状态与送中重定向，阻断节点触发 12 小时冷冻隔离，彻底杜绝 Google/YouTube/IG 突发打不开。
 6. **双引擎内核热重载 (Dual-Engine Hot-Reload)**：融合 `Script.js` 扩展脚本注入与运行时配置原子写盘 + REST API 重载通知，彻底攻克快捷键失效与配置穿透故障。
 
+### 三大多维启动入口定位：
+- **`main_fluent.py`（主流现代入口）**：基于 PyQt6 + PyQt-Fluent-Widgets 现代桌面框架，构建 `MainWindow` 并挂载 `AppController` 协调器、`SignalBus` 总线与全套 Fluent 交互体验。
+- **`main.py`（经典原生入口）**：基于 Python 原生 `tkinter` 框架构建，调用 `gui/app.py` 中的 `ClashVergeTabsManager`，为轻量免 Qt 依赖环境提供基础运行支持。
+- **`gemini-code-1788793285196.py`（历史兼容代理）**：为早期桌面快捷方式与历史脚本提供平滑兼容层，实际透明转发至 `main.py`。
+
 ---
 
 ## 二、 全局代码库文件树状结构 (Directory Tree & Component Manifest)
 
-以下为当前项目的完整目录与源文件全景树状图（所有活跃模块 100% 无遗漏呈现）：
+以下为当前项目的完整目录与源文件全景树状图（所有有效模块 100% 无遗漏呈现）：
 
 ```
 py/
@@ -154,7 +164,9 @@ py/
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────────┐
 │                                    应用启动层 (Launchers)                                  │
-│   main.py (环境自检/引导) ──► main_fluent.py (PyQt6 Fluent Design) ──► gemini-code (兼容层) │
+│   [主流现代入口] main_fluent.py ──► MainWindow (Fluent Design UI) ──► AppController      │
+│   [经典原生入口] main.py        ──► ClashVergeTabsManager (Tkinter UI) ──► (gui/app.py)   │
+│   [向后兼容入口] gemini-code... ──► 历史脚本与桌面快捷方式无缝代理 ──► 转发至 main.py    │
 └────────────────────────────────────────────┬─────────────────────────────────────────────┘
                                              │
                                              ▼
@@ -200,7 +212,7 @@ py/
 ### 1. 全量大优选流水线 (AutoPipeline)
 - **步骤 1（多源拉取与去重）**：从云端订阅 URL 或本地配置提取 YAML 原始节点列表，以 `IP:Port` 物理端点为核心键执行全量去重。
 - **步骤 2（机房嗅探与防漂移）**：多线程并发请求 Trace 探针，解析真实机房三字码（HKG, NRT, SJC 等），比对 7 天机房历史漂移记录，过滤伪装或漂移节点。
-- **步骤 3（真实带宽测速）**：使用 `ProbeService` 进行多段下行测速，计算真实 MB/s 吞吐，剔除低于阈值（如 5.0 MB/s）的劣质节点并记入测速黑名单。
+- **步骤 3（真实带宽测速）**：使用 `ProbeService` 进行多段下行测速，计算真实 MB/s 吞吐，剔除低于阈值（如 5.0 MB/s）的劣质节点并记入测速黑名单。严禁使用 Cloudflare 测速源，全面采用 Google 官方分发测速包。
 - **步骤 4（规范冠名与入池）**：根据机房与带宽生成规范名（如 `香港 HKG 22.56 MB/s`），写入 `cloud_endpoints` 字典霸占命名权，沉淀入精选池。
 - **步骤 5（双引擎热重载）**：生成包含 800+ 物理香港端点硬核拦截清单的 `Script.js`，原子覆盖 `clash-verge.yaml` 并通过 REST API 通知内核重载。
 
@@ -382,6 +394,8 @@ def pack_repo():
                         lang = 'json'
                     elif lang == 'yaml' or lang == 'yml':
                         lang = 'yaml'
+                    elif lang == 'gitignore':
+                        lang = 'gitignore'
                     
                     out_f.write(f"```{lang}\n")
                     out_f.write(content)
