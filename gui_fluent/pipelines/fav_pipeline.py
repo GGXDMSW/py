@@ -7,6 +7,7 @@ import ssl
 import sys
 import time
 import traceback
+import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -425,7 +426,7 @@ class FavPipelineWorker(QThread):
 
                     time.sleep(0.15)
 
-                    # 非香港赛道专属：Google 送中洁净度感知探测 (打标分流，不粗暴判 0)
+                    # 非香港赛道专属：Google 送中与官方拦截洁净度感知探测 (打标分流，不粗暴判 0)
                     if track_label == "非香港":
                         try:
                             g_req = urllib.request.Request(
@@ -434,11 +435,18 @@ class FavPipelineWorker(QThread):
                             )
                             with speed_opener.open(g_req, timeout=2.5) as g_resp:
                                 final_gurl = g_resp.geturl()
-                                if "google.com.hk" in final_gurl:
+                                if "google.com.hk" in final_gurl or "sorry" in final_gurl:
                                     google_hk_detected_nodes.add(n)
+                                    tag_label = "送中重定向" if "google.com.hk" in final_gurl else "官方验证拦截"
                                     self.log_signal.emit(
-                                        f"🏷️ [Google送中打标] 节点 {n} 遭重定向至 {final_gurl}，将打上 [送中] 标并转入常规优选组！"
+                                        f"🏷️ [Google合规打标] 节点 {n} 遭{tag_label} ({final_gurl})，将打上 [送中] 标并转入常规优选组！"
                                     )
+                        except urllib.error.HTTPError as he:
+                            if he.code in (429, 403) or "sorry" in getattr(he, "url", ""):
+                                google_hk_detected_nodes.add(n)
+                                self.log_signal.emit(
+                                    f"🏷️ [Google合规打标] 节点 {n} 遭官方风控拦截 (HTTP {he.code})，将打上 [送中] 标并转入常规优选组！"
+                                )
                         except Exception:
                             pass
 

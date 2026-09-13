@@ -6,6 +6,7 @@ import datetime
 import re
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -43,6 +44,7 @@ class AutoHealWatcher:
         probe_url: str = "https://www.google.com/generate_204",
         min_blackhole_hosts: int = 2,
         is_pipeline_running_fn: Optional[Callable[[], bool]] = None,
+        startup_grace_period: float = 15.0,
     ):
         self.client = client or ClashClient()
         self.get_candidates_fn = get_candidates_fn
@@ -50,6 +52,10 @@ class AutoHealWatcher:
         self.on_status_update = on_status_update
         self.log_fn = log_fn
         self.is_pipeline_running_fn = is_pipeline_running_fn
+
+        # 开机/启动冷启动静默保护期配置 (秒)
+        self.startup_grace_period: float = max(0.0, float(startup_grace_period))
+        self._start_time: float = time.time()
 
         # 核心探测参数
         self.enabled: bool = True
@@ -338,6 +344,13 @@ class AutoHealWatcher:
 
         now = time.time()
 
+        # 开机/启动冷启动静默保护期：前 15 秒仅监控更新，绝不下发任何物理切换与断流操作
+        if (now - self._start_time) < self.startup_grace_period:
+            remain = int(self.startup_grace_period - (now - self._start_time))
+            self.current_status_summary = f"⏳ 开机网络热身静默保护中 ({remain}s)"
+            self._notify_status()
+            return
+
         # 1. 轻量拉取各组当前在用节点（调用 self.client.get_proxy(grp)）
         group_current_nodes: Dict[str, str] = {}
         for grp in self.monitored_groups:
@@ -573,9 +586,19 @@ class AutoHealWatcher:
             now = time.time()
             hosts_preview = ", ".join(sorted(distinct_hosts)[:3])
             if probe_delay >= 99999:
+                # 二次复验防抖机制：首次超时后等待 500ms 重试确认，两次均超时方判定为暴毙
+                time.sleep(0.5)
+                for u in self.probe_urls:
+                    rd = self.client.query_proxy_delay(curr_n, u, timeout_ms=self.probe_timeout_ms)
+                    if rd < probe_delay:
+                        probe_delay = rd
+                    if probe_delay < self.degrade_rtt_ms:
+                        break
+
+            if probe_delay >= 99999:
                 # 确认物理暴毙，立即下发自愈顺移
                 dead_reason = (
-                    f"【{grp}】并发 {len(distinct_hosts)} 个主域名{stall_desc}且 HTTPS 探针超时暴毙 (目标: {hosts_preview})"
+                    f"【{grp}】并发 {len(distinct_hosts)} 个主域名{stall_desc}且 HTTPS 双探针超时暴毙 (二次复验确认，目标: {hosts_preview})"
                 )
                 self.yellow_cards.pop(curr_n, None)
                 self._execute_auto_heal(
@@ -617,19 +640,67 @@ class AutoHealWatcher:
             with self._heal_lock:
                 self._healing_groups.discard(grp)
 
+    def _inspect_google_node_compliance(self, c_node: str) -> Tuple[bool, str, str]:
+        """
+        全面深度检测非香港出口节点的 Google 洁净度：
+        1. 检测 Google Anycast 送中 (.hk 重定向)
+        2. 检测 Google 官方风控拦截 (HTTP 429 Too Many Requests / 403 Forbidden / sorry/index 人机验证)
+        返回: (is_bad: bool, bad_type: str, detail_msg: str)
+        """
+        now = time.time()
+        # 1. 优先查长效冷冻记录
+        if c_node in self.google_hk_nodes and self.google_hk_nodes[c_node] > now:
+            remain = int(self.google_hk_nodes[c_node] - now)
+            return True, "Google 拦截隔离", f"该节点处于长效熔断期 (剩余 {remain}s)"
+
+        mix_port = self.client.get_mixed_port(default=7897)
+        proxy_handler = urllib.request.ProxyHandler({
+            "http": f"http://127.0.0.1:{mix_port}",
+            "https": f"http://127.0.0.1:{mix_port}",
+        })
+        opener = urllib.request.build_opener(proxy_handler)
+        g_req = urllib.request.Request(
+            "https://www.google.com",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        )
+
+        try:
+            with opener.open(g_req, timeout=3.0) as g_resp:
+                final_u = g_resp.geturl()
+                if "google.com.hk" in final_u:
+                    return True, "Google Anycast 送中", f"重定向至 {final_u} (.hk 归属)"
+                if "sorry" in final_u or "/sorry/" in final_u:
+                    return True, "Google 官方风控拦截", f"导向人机验证页面: {final_u}"
+                return False, "CLEAN", final_u
+        except urllib.error.HTTPError as e:
+            # 精准捕获 Google 官方风控 429 / 403 / 503 及 sorry 重定向
+            loc = e.headers.get("Location", "") if hasattr(e, "headers") else ""
+            if e.code == 429 or "sorry" in getattr(e, "url", "") or "sorry" in loc:
+                return True, "Google 官方风控拦截", f"HTTP 429 Too Many Requests (人机验证拦截)"
+            elif e.code == 403:
+                return True, "Google 区域受限拦截", f"HTTP 403 Forbidden (非授权区域受限)"
+            elif "google.com.hk" in getattr(e, "url", "") or "google.com.hk" in loc:
+                return True, "Google Anycast 送中", f"重定向抛错且包含 .hk"
+            return False, f"HTTP_{e.code}", str(e)
+        except Exception as ex:
+            return False, "EXCEPTION", str(ex)
+
     def _proactive_heartbeat_worker(self):
         """
         后台异步主动心跳巡检双保险流水线：
         周期性轻量化双探针竞速探测各受监控策略组当前在用节点的可用性，
-        若检测到物理暴毙（超时 >= 99999ms）或非港出口触发 Google 送中，抓取坏死连接并立即触发自愈切换。
+        若检测到物理暴毙（超时 >= 99999ms）或非港出口触发 Google 送中/官方拦截，抓取坏死连接并立即触发自愈切换。
         """
         if callable(self.is_pipeline_running_fn) and self.is_pipeline_running_fn():
             self.current_status_summary = "⏸️ 优选测速中 (心跳探针自动避让)"
             self._notify_status()
             return
 
+        now = time.time()
+        if (now - self._start_time) < self.startup_grace_period:
+            return
+
         try:
-            now = time.time()
             for grp in self.monitored_groups:
                 g_data = self.client.get_proxy(grp, timeout=0.8)
                 c_node = g_data.get("now", "")
@@ -638,31 +709,25 @@ class AutoHealWatcher:
 
                 is_non_hk = ("非香港" in grp)
 
-                # (0) 非香港策略组专属：Google 送中洁净度感知防御双保险
+                # (0) 非香港策略组专属：Google 官方拦截与送中洁净度感知防御双保险
                 if is_non_hk:
-                    is_google_hk = False
+                    is_bad = False
+                    bad_type = ""
+                    detail_msg = ""
+
                     if c_node in self.google_hk_nodes and self.google_hk_nodes[c_node] > now:
-                        is_google_hk = True
+                        is_bad = True
+                        bad_type = "Google 拦截隔离"
+                        detail_msg = f"该节点处于长效熔断期 (剩余 {int(self.google_hk_nodes[c_node] - now)}s)"
                     elif (now - self._last_google_check.get(c_node, 0.0)) >= 30.0:
                         self._last_google_check[c_node] = now
-                        try:
-                            mix_port = self.client.get_mixed_port(default=7897)
-                            proxy_handler = urllib.request.ProxyHandler({
-                                "http": f"http://127.0.0.1:{mix_port}",
-                                "https": f"http://127.0.0.1:{mix_port}",
-                            })
-                            opener = urllib.request.build_opener(proxy_handler)
-                            g_req = urllib.request.Request("https://www.google.com", headers={"User-Agent": "Mozilla/5.0"})
-                            with opener.open(g_req, timeout=2.0) as g_resp:
-                                final_u = g_resp.geturl()
-                                if "google.com.hk" in final_u:
-                                    is_google_hk = True
-                                    self.google_hk_nodes[c_node] = now + 43200
-                                    self.log(f"🚨 [Google送中感知] 节点 【{c_node}】 访问 google.com 被重定向至 {final_u}，触发非港自愈冷冻！")
-                        except Exception:
-                            pass
+                        is_bad, bad_type, detail_msg = self._inspect_google_node_compliance(c_node)
+                        if is_bad:
+                            self.google_hk_nodes[c_node] = now + 43200
+                            self.cooldown_nodes[c_node] = now + 43200
+                            self.log(f"🚨 [{bad_type}] 节点 【{c_node}】 {detail_msg}，触发非港 12 小时自愈熔断！")
 
-                    if is_google_hk:
+                    if is_bad:
                         with self._heal_lock:
                             if grp in self._healing_groups:
                                 continue
@@ -687,7 +752,7 @@ class AutoHealWatcher:
                             self._execute_auto_heal(
                                 target_group=grp,
                                 dead_node=c_node,
-                                reason=f"【{grp}】节点触发 Google 送中 (.hk) 违规熔断，保护 Gemini / IDE 会话",
+                                reason=f"【{grp}】{bad_type} ({detail_msg})，触发 12 小时熔断隔离保护 Gemini/IDE",
                                 dead_conn_ids=dead_cids,
                                 is_non_hk=True,
                             )
@@ -745,7 +810,7 @@ class AutoHealWatcher:
                         self._execute_auto_heal(
                             target_group=grp,
                             dead_node=c_node,
-                            reason=f"【{grp}】主动心跳探针探测超时(>{self.probe_timeout_ms}ms物理断流)",
+                            reason=f"【{grp}】主动心跳探针超时(>{self.probe_timeout_ms}ms物理断流，二次复验确认)",
                             dead_conn_ids=dead_cids,
                             is_non_hk=is_non_hk,
                         )
@@ -790,10 +855,11 @@ class AutoHealWatcher:
         switch_cost_ms = (time.perf_counter() - t0) * 1000
 
         if switched:
-            # 步骤 3：坏死节点冷冻熔断 15 分钟 (若触发 Google 送中则冷冻 12 小时)
+            # 步骤 3：坏死节点冷冻熔断 15 分钟 (若触发 Google 官方拦截/送中则冷冻 12 小时)
             self.cooldown_nodes[dead_node] = now + self.cooldown_duration
-            if is_non_hk and ("Google 送中" in reason or dead_node in self.google_hk_nodes):
+            if is_non_hk and ("Google" in reason or dead_node in self.google_hk_nodes):
                 self.google_hk_nodes[dead_node] = max(self.google_hk_nodes.get(dead_node, 0.0), now + 43200)
+                self.cooldown_nodes[dead_node] = max(self.cooldown_nodes.get(dead_node, 0.0), now + 43200)
             self.healed_count += 1
             self.last_heal_timestamp = now
 
@@ -814,7 +880,7 @@ class AutoHealWatcher:
             }
 
             non_hk_tip = " (已严格继承非港限制，Gemini/反重力保持畅通)" if is_non_hk else ""
-            log_msg = f"✨ [优雅引流完成] 策略组 【{target_group}】 耗时 {switch_cost_ms:.1f}ms 顺移至备选节点 【{backup_node}】！{non_hk_tip}"
+            log_msg = f"✨ [优雅引流完成] 策略组 【{target_group}】 耗时 {switch_cost_ms:.1f}ms 顺移至备选节点 【{backup_node}】！原因: {reason}{non_hk_tip}"
             self.log(log_msg)
 
             # 步骤 4：异步平滑并发清退 —— 双保险真空吸尘器

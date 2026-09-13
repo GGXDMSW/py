@@ -83,6 +83,7 @@ class AppController(QObject):
         self.clash_client = ClashClient(base_url="http://127.0.0.1:9097")
         self._pipeline_worker = None
         self._fav_pipeline_worker = None
+        self._is_checking_google_hk = False
         self._scheduler_config_provider = None
         self._load_persisted_into_state()
 
@@ -517,11 +518,12 @@ class AppController(QObject):
 
     def is_pipeline_running(self) -> bool:
         """
-        判断流水线当前是否正在后台运行 (全自动大优选或精选池复测)
+        判断流水线或单项核验当前是否正在后台运行 (全自动大优选/精选池复测/送中核验)
         """
         auto_running = self._pipeline_worker is not None and self._pipeline_worker.isRunning()
         fav_running = self._fav_pipeline_worker is not None and self._fav_pipeline_worker.isRunning()
-        return auto_running or fav_running
+        hk_check_running = getattr(self, "_is_checking_google_hk", False)
+        return auto_running or fav_running or hk_check_running
 
     def start_auto_pipeline(self, config: dict) -> bool:
         """

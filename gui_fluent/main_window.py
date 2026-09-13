@@ -774,12 +774,23 @@ class MainWindow(QWidget):
         is_non_hk = info.get("is_non_hk", False)
         cost_ms = info.get("cost_ms", 0)
         evicted = info.get("evicted", 0)
+        reason = info.get("reason", "检测到链路断流异常")
         tag = "非港AI" if is_non_hk else "全量出口"
-        title = f"🛡️ 【{tag}】秒级断流自愈"
+        title = f"🛡️ 【{tag}】秒级自愈已触发"
         tip = "\n✨ 严格继承非港限制，Gemini/反重力不受影响" if is_non_hk else ""
-        msg = f"策略组 【{grp}】 坏死断流！\n已在 {cost_ms}ms 内斩断 {evicted} 条僵尸连接，并顺移至 【{backup_node}】{tip}"
+        msg = (
+            f"触发原因：{reason}\n"
+            f"目标策略组：【{grp}】\n"
+            f"已将坏死节点 【{dead_node}】 顺移至 【{backup_node}】\n"
+            f"(耗时 {cost_ms}ms，清理 {evicted} 条僵尸连接){tip}"
+        )
         if hasattr(self, "tray_icon") and self.tray_icon:
-            self.tray_icon.showMessage(title, msg, QSystemTrayIcon.MessageIcon.Information, 4500)
+            self.tray_icon.showMessage(title, msg, QSystemTrayIcon.MessageIcon.Information, 5000)
+
+        # 同步在主程序控制台日志中显式输出高亮审计条目
+        self.controller.log(
+            f"🔔 [自愈通知] 触发原因: {reason} | 策略组: 【{grp}】 | 节点切换: 【{dead_node}】 -> 【{backup_node}】 (耗时: {cost_ms}ms)"
+        )
 
     def _on_auto_heal_toggled(self, state: int):
         enabled = bool(state == 2 or (hasattr(Qt, "CheckState") and state == Qt.CheckState.Checked.value) or bool(state))
